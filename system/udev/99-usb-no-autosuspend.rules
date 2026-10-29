@@ -1,0 +1,3 @@
+# Disable USB autosuspend for all devices (prevents LiDAR disconnects)
+ACTION=="add", SUBSYSTEM=="usb", ATTR{power/control}="on"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{power/autosuspend}="-1"

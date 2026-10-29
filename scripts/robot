@@ -1,0 +1,168 @@
+#!/bin/bash
+# robot: command-line control of the tracked robot. `robot help` lists everything;
+# ~/robot_ws/README.md explains it and the raw ROS commands underneath.
+set -o pipefail
+
+WS="$HOME/robot_ws"
+CLI="$(dirname "$(readlink -f "$0")")/robot_cli.py"
+source /opt/ros/humble/setup.bash
+source "$WS/install/setup.bash"
+export ROS_DOMAIN_ID=0
+
+bold() { printf '\033[1m%s\033[0m\n' "$*"; }
+py() { python3 "$CLI" "$@"; }
+stack_active() { [ "$(systemctl is-active robot.service)" = active ]; }
+need_stack() { stack_active || { echo "the robot stack is not running: robot start" >&2; exit 1; }; }
+ip_addr() { hostname -I | awk '{print $1}'; }
+
+usage() {
+  cat <<EOF
+$(bold "robot: drive and manage the robot from a terminal")
+
+$(bold "System")
+  robot status                  what's running, sensor rates, nav mode, addresses
+  robot start | stop | restart  the robot stack (drive, lidar, cameras, Foxglove, rosbridge)
+  robot logs [drive|nav|cameras|web]   follow the logs (Ctrl-C to quit)
+  robot power                   Jetson power mode and current board power
+  robot build                   rebuild the ROS workspace
+  robot flash                   rebuild + flash the Pico drive firmware (stops the stack meanwhile)
+  robot sim [explore]           simulated robot in a test room (Gazebo, separate from the real one);
+                                windows open in a remote-desktop session, Foxglove ws://<ip>:8766 always
+
+$(bold "Driving")              (lift the robot or clear the floor first)
+  robot drive                   keyboard driving (i forward, , back, j/l turn, k stop, q/z speed)
+  robot move <metres> [m/s]     drive straight a set distance (negative = backwards)
+  robot turn <degrees> [rad/s]  turn on the spot (positive = left)
+  robot stop-motors             stop now and cancel any navigation goal
+  robot wheels                  live track encoder counts and speeds
+
+$(bold "Mapping and navigation")
+  robot map start               start mapping (SLAM): drive around with robot drive
+  robot map explore             map on its own until nothing is left, then come back (then save)
+  robot map save <name>         save the map being made
+  robot map list                saved maps
+  robot map nav [name]          navigate on a saved map (default: the latest)
+  robot map stop                stop mapping / navigation
+  robot map delete <name>       delete a saved map
+  robot pose <x> <y> [deg]      tell navigation where the robot is on the map
+  robot goal <x> <y> [deg]      drive to a point on the map (Ctrl-C cancels)
+  robot where                   where the robot is (map frame if navigating)
+
+$(bold "Calibration and cameras")
+  robot calib [show]            drive calibration values
+  robot calib set k=v ...       change them live and save (wheel_radius, track_width, invert_left/right,
+                                swap_sides, battery_scale = multimeter volts / shown volts)
+  robot snap [left|right|depth] save a camera (or colour depth) picture to ~/robot_snaps/
+  robot depth                   stereo distance to what's left / ahead / right
+  robot battery                 live pack voltage and approximate charge
+
+Web UI http://$(ip_addr):8080   Foxglove ws://$(ip_addr):8765   rosbridge ws://$(ip_addr):9090
+More: $WS/README.md
+EOF
+}
+
+nav_call() {  # nav_call <service> [param value]: set a nav_manager parameter, then call the service
+  need_stack
+  if [ -n "$2" ]; then
+    timeout 10 ros2 param set /nav_manager "$2" "$3" >/dev/null || { echo "nav_manager not responding" >&2; exit 1; }
+  fi
+  timeout 60 ros2 service call "/robot/$1" std_srvs/srv/Trigger \
+    | sed -n "s/.*success=\(True\|False\), message='\(.*\)')/\2/p"
+}
+
+cmd="$1"; shift || true
+case "$cmd" in
+  ""|help|-h|--help) usage ;;
+
+  status)
+    bold "Services"
+    printf '  %-16s %s\n' "robot stack" "$(systemctl is-active robot.service)" "web UI" "$(systemctl is-active robot-web.service)"
+    if stack_active; then bold "Sensors (2 s sample)"; py status-topics; fi
+    bold "Addresses"
+    echo "  web UI http://$(ip_addr):8080   Foxglove ws://$(ip_addr):8765   rosbridge ws://$(ip_addr):9090"
+    ;;
+
+  start|stop|restart)
+    sudo -n systemctl "$cmd" robot.service && echo "robot stack: $cmd done (takes ~30 s to come fully up)" ;;
+
+  logs)
+    case "$1" in
+      drive)   journalctl -u robot.service -f -o cat | grep --line-buffered -E "pico_bridge|ekf|rplidar" ;;
+      nav)     journalctl -u robot.service -f -o cat | grep --line-buffered -E "nav_manager|amcl|slam|planner|controller|bt_navigator" | grep --line-buffered -v "rf2o_laser_odometry\]: (execution|Laser odom|Robot-base)" ;;
+      cameras) journalctl -u robot.service -f -o cat | grep --line-buffered -E "argus|preview|camera_container" ;;
+      web)     journalctl -u robot-web.service -f -o cat ;;
+      *)       journalctl -u robot.service -f -o cat ;;
+    esac ;;
+
+  power)
+    sudo -n nvpmodel -q 2>/dev/null | grep -i "power mode"
+    { timeout 3 tegrastats --interval 1000 || true; } | head -1 | grep -oE "CPU \[[^]]*\]|GR3D_FREQ [0-9]+%|tj@[0-9.]+C|VDD_IN [0-9]+mW"
+    true ;;
+
+  build)
+    (cd "$WS" && colcon build --symlink-install "$@") ;;
+
+  flash)
+    was_up=0; stack_active && was_up=1
+    [ $was_up = 1 ] && { echo "stopping the stack (it holds the Pico's port)…"; sudo -n systemctl stop robot.service; sleep 2; }
+    "$WS/firmware/flash.sh"; rc=$?
+    [ $was_up = 1 ] && { echo "starting the stack…"; sudo -n systemctl start robot.service; }
+    exit $rc ;;
+
+  drive)
+    need_stack
+    echo "Driving: i forward, , backward, j/l turn left/right, u/o/m/. curves, k stop, q/z faster/slower, Ctrl-C quit."
+    trap 'py stop >/dev/null 2>&1' EXIT
+    ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -p speed:=0.2 -p turn:=1.0 ;;
+
+  move|turn|wheels|where|pose|goal|snap|depth|battery)
+    need_stack; py "$cmd" "$@" ;;
+  stop-motors)
+    need_stack; py stop ;;
+  calib)
+    need_stack; py calib "$@" ;;
+
+  sim)
+    # Gazebo copy of this robot on ROS domain 1, so it never talks to the real one.
+    export ROS_DOMAIN_ID=1
+    gui=false; [ -n "$DISPLAY" ] && gui=true
+    groups=()
+    stop_sim() {
+      echo; echo "stopping the simulation…"
+      for g in "${groups[@]}"; do kill -INT -- "-$g" 2>/dev/null; done; sleep 6
+      for g in "${groups[@]}"; do kill -TERM -- "-$g" 2>/dev/null; done; sleep 1
+      for g in "${groups[@]}"; do kill -KILL -- "-$g" 2>/dev/null; done
+      exit 0
+    }
+    trap stop_sim INT TERM
+    echo "starting Gazebo (windows: $gui; Foxglove: ws://$(ip_addr):8766)…"
+    setsid ros2 launch robot_description sim.launch.py gui:=$gui rviz:=$gui foxglove:=true & groups+=($!)
+    sleep 20
+    echo "starting mapping + Nav2…"
+    setsid ros2 launch robot_navigation navigation.launch.py use_sim_time:=true >/dev/null 2>&1 & groups+=($!)
+    if [ "$1" = explore ]; then
+      sleep 30
+      echo "exploring (watch the map grow)…"
+      setsid ros2 run robot_bringup explorer --ros-args -p use_sim_time:=true & groups+=($!)
+    else
+      echo "mapping: drive it with  ROS_DOMAIN_ID=1 ros2 run teleop_twist_keyboard teleop_twist_keyboard"
+    fi
+    echo "Ctrl-C stops the simulation."
+    wait ;;
+
+  map)
+    sub="$1"; shift || true
+    case "$sub" in
+      start)  nav_call start_mapping ;;
+      explore) nav_call start_exploring ;;
+      save)   [ -n "$1" ] || { echo "usage: robot map save <name>   (letters, digits, - _)" >&2; exit 1; }
+              nav_call save_map map_name "'$1'" ;;
+      nav)    nav_call start_navigation map_file "'${1:-}'" ;;
+      stop)   nav_call stop ;;
+      list|"") py maps ;;
+      delete) [ -n "$1" ] || { echo "usage: robot map delete <name>" >&2; exit 1; }; py map-delete "$1" ;;
+      *) echo "robot map: start | explore | save <name> | list | nav [name] | stop | delete <name>" >&2; exit 1 ;;
+    esac ;;
+
+  *) echo "unknown command: $cmd   (robot help)" >&2; exit 1 ;;
+esac

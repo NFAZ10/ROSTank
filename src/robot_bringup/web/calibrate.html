@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Camera Calibration</title>
+<style>
+/* Same tokens as index.html. */
+:root {
+  --bg: #f3f4f1; --panel: #ffffff; --ink: #1d2320; --muted: #66706a; --line: #dde1dc;
+  --accent: #1f7a5a; --accent-ink: #ffffff; --danger: #c2372b; --warn: #b7791f; --goal: #2f6fd6;
+  --radius: 10px; --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121614; --panel: #1b201d; --ink: #e6ebe7; --muted: #95a09a; --line: #2c332f;
+    --accent: #3fb58a; --accent-ink: #08130e; --danger: #ef6b5e; --warn: #e3a948; --goal: #6ea2ff;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 var(--font); }
+header {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+  padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+  position: sticky; top: 0; z-index: 5;
+}
+header h1 { font-size: 17px; margin: 0 8px 0 0; }
+header a { color: var(--muted); font-size: 14px; text-decoration: none; }
+header a:hover { color: var(--ink); }
+main { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; padding: 14px 16px; max-width: 1200px; }
+@media (max-width: 800px) { main { grid-template-columns: minmax(0, 1fr); } }
+.wide { grid-column: 1 / -1; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; min-width: 0; }
+.card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
+p.sub { margin: -4px 0 10px; font-size: 13px; color: var(--muted); }
+
+.cams { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 560px) { .cams { grid-template-columns: minmax(0, 1fr); } }
+.view { position: relative; aspect-ratio: 4 / 3; background: #000; border-radius: 8px; overflow: hidden; }
+.view img, .view canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.view .tag { position: absolute; left: 8px; top: 8px; z-index: 2; font-size: 12.5px; font-weight: 600;
+  padding: 3px 8px; border-radius: 999px; background: rgba(0,0,0,.6); color: #fff; }
+.view .tag.ok { background: #1f7a5a; }
+
+.bigstate { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 18px; margin-top: 12px; }
+.count { font-family: var(--mono); font-size: 40px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1; }
+.count small { font-size: 15px; color: var(--muted); font-weight: 400; }
+.hold { font-size: 18px; font-weight: 600; }
+.hold.ok { color: var(--accent); } .hold.wait { color: var(--warn); } .hold.no { color: var(--muted); }
+
+.bars { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr); gap: 6px 10px; align-items: center; font-size: 13px; }
+.bars .h { font-size: 12px; color: var(--muted); }
+.bar { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; }
+.bar i { display: block; height: 100%; width: 0; background: var(--warn); transition: width .3s; }
+.bar i.full { background: var(--accent); }
+
+button {
+  font: inherit; font-weight: 600; font-size: 14px; color: var(--ink); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; cursor: pointer;
+}
+button:hover { border-color: var(--muted); }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+button.on { background: var(--goal); color: #fff; border-color: var(--goal); }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.field { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.field select { font: inherit; padding: 7px 8px; border-radius: 7px; border: 1px solid var(--line);
+  background: var(--bg); color: var(--ink); max-width: 260px; }
+.field input { width: 64px; font: inherit; padding: 7px 8px; border-radius: 7px; border: 1px solid var(--line);
+  background: var(--bg); color: var(--ink); }
+.msg { font-size: 13px; color: var(--muted); margin-top: 10px; min-height: 1.4em; overflow-wrap: anywhere; }
+.msg.err { color: var(--danger); }
+table.res { border-collapse: collapse; font-size: 14px; margin: 8px 0; font-variant-numeric: tabular-nums; }
+table.res td { padding: 4px 14px 4px 0; border-bottom: 1px solid var(--line); }
+table.res td:nth-child(2) { font-family: var(--mono); }
+.verdict { font-size: 13px; }
+.verdict.good { color: var(--accent); } .verdict.bad { color: var(--danger); }
+.rect { width: 100%; border-radius: 8px; margin-top: 8px; background: #000; }
+ul.tips { margin: 0; padding-left: 18px; font-size: 13.5px; color: var(--muted); display: grid; gap: 6px; }
+ul.tips b { color: var(--ink); font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Camera calibration</h1>
+  <a href="/">← Control page</a>
+</header>
+
+<main>
+  <section class="card wide">
+    <h2>Cameras</h2>
+    <div class="cams">
+      <div class="view"><img id="imgLeft" alt="Left camera"><canvas id="ovLeft"></canvas><span class="tag" id="tagLeft">Left</span></div>
+      <div class="view"><img id="imgRight" alt="Right camera"><canvas id="ovRight"></canvas><span class="tag" id="tagRight">Right</span></div>
+    </div>
+    <div class="bigstate">
+      <div class="count"><span id="count">0</span><small> / 30 samples</small></div>
+      <div class="hold no" id="hold">Show the board to both cameras</div>
+    </div>
+    <div class="row" style="margin-top: 12px">
+      <button id="auto">Auto-capture: off</button>
+      <button class="primary" id="capture">Capture now</button>
+      <button id="undo">Undo last</button>
+      <button id="clear">Clear all</button>
+    </div>
+    <div class="msg" id="msg"></div>
+  </section>
+
+  <section class="card">
+    <h2>Coverage</h2>
+    <p class="sub">Fill every bar: move the board across the whole view, near and far, and tilt it.</p>
+    <div class="bars" id="bars"></div>
+  </section>
+
+  <section class="card">
+    <h2>Board</h2>
+    <p class="sub">Count the <b>inside</b> corners, where four squares meet, not the squares themselves. Changing these clears the samples.</p>
+    <div class="row">
+      <label class="field">Across <input id="cols" type="number" min="2" max="30"></label>
+      <label class="field">Down <input id="rows" type="number" min="2" max="30"></label>
+      <label class="field">Square <input id="square" type="number" min="3" max="200" step="0.1"> mm</label>
+      <button id="applyBoard">Apply</button>
+    </div>
+    <ul class="tips" style="margin-top: 12px">
+      <li><b>Prop the board up</b> rather than holding it, and move it between shots. The two cameras capture about 14 ms apart, so any movement spoils the shot.</li>
+      <li><b>Cover the whole view</b> (centre, all four corners and edges) between about 0.25 m and 0.6 m. With a small board, further away is too imprecise and gets refused.</li>
+      <li><b>Tilt it 30–45°</b> left, right, up and down for some shots, no more, and keep the whole board in view.</li>
+      <li><b>No glare</b> on the board, and keep it out of the robot's own body at the bottom of the view.</li>
+    </ul>
+  </section>
+
+  <section class="card wide">
+    <h2>Calibrate</h2>
+    <div class="row">
+      <label class="field">Previous session <select id="sessions"></select></label>
+      <button id="loadSession">Load</button>
+    </div>
+    <div class="row" style="margin-top: 8px">
+      <button class="primary" id="compute">Calibrate</button>
+      <button id="check">Check live view</button>
+      <button id="save" disabled>Save &amp; apply</button>
+    </div>
+    <div class="msg" id="jobMsg"></div>
+    <div id="result" hidden>
+      <table class="res" id="resTable"></table>
+      <div class="verdict" id="verdict"></div>
+      <img class="rect" id="rect" alt="Rectified left and right images side by side, with horizontal guide lines">
+      <p class="sub" style="margin-top: 6px">Rectified check: the same feature should sit on the same green line in both halves.</p>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+async function api(path, body) {
+  const opts = body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+function note(id, text, err) { $(id).textContent = text; $(id).classList.toggle('err', !!err); }
+
+// ---------------- camera views ----------------
+function startStream(side) {
+  const img = $(side === 'left' ? 'imgLeft' : 'imgRight');
+  img.onerror = () => setTimeout(() => startStream(side), 2000);
+  img.src = `/stream/${side}?t=${Date.now()}`;
+}
+startStream('left'); startStream('right');
+
+function drawCorners(canvasId, live, steady) {
+  const cv = $(canvasId), dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  if (cv.width !== W * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+  if (!live.found) return;
+  g.strokeStyle = steady ? '#3fb58a' : '#e3a948'; g.lineWidth = 2;
+  g.beginPath();
+  live.corners.forEach(([x, y], i) => (i ? g.lineTo(x * W, y * H) : g.moveTo(x * W, y * H)));
+  g.stroke();
+  g.fillStyle = g.strokeStyle;
+  for (const [x, y] of live.corners) { g.beginPath(); g.arc(x * W, y * H, 2.5, 0, 7); g.fill(); }
+  const [x0, y0] = live.corners[0];   // first corner: must be the same corner in both views
+  g.fillStyle = '#ef6b5e'; g.beginPath(); g.arc(x0 * W, y0 * H, 5, 0, 7); g.fill();
+}
+
+// ---------------- state ----------------
+let st = null, lastJob = '', boardShown = false, calibGood = false;
+const NAMES = ['Left-right', 'Up-down', 'Near-far', 'Tilt'];
+async function poll() {
+  try {
+    st = await api('/api/stereo');
+    const L = st.live.left, R = st.live.right;
+    drawCorners('ovLeft', L, st.steady); drawCorners('ovRight', R, st.steady);
+    $('tagLeft').textContent = 'Left: ' + (L.found ? 'board found' : 'no board');
+    $('tagRight').textContent = 'Right: ' + (R.found ? 'board found' : 'no board');
+    $('tagLeft').className = 'tag' + (L.found ? ' ok' : ''); $('tagRight').className = 'tag' + (R.found ? ' ok' : '');
+    $('count').textContent = st.samples;
+    const hold = $('hold');
+    if (st.busy && st.job.status !== 'running') { hold.textContent = 'Capturing… keep still'; hold.className = 'hold wait'; }
+    else if (L.found && R.found) {
+      hold.textContent = st.steady ? (st.auto ? 'Steady: capturing when it\'s a new pose' : 'Steady: ready to capture') : 'Hold still…';
+      hold.className = 'hold ' + (st.steady ? 'ok' : 'wait');
+    } else if (L.found || R.found) { hold.textContent = `Only the ${L.found ? 'left' : 'right'} camera sees the board`; hold.className = 'hold wait'; }
+    else { hold.textContent = st.stack === 'active' ? 'Show the board to both cameras' : 'Robot stack is off: start it on the control page'; hold.className = 'hold no'; }
+    $('auto').textContent = 'Auto-capture: ' + (st.auto ? 'on' : 'off'); $('auto').classList.toggle('on', st.auto);
+    $('capture').disabled = st.busy || !(L.found && R.found);
+    $('compute').disabled = st.busy || st.samples < 10;
+    if (st.message) note('msg', st.message, /lost|similar|no matching|unsupported|busy|changed|moved|too far|edge/.test(st.message));
+    let bars = '<span></span><span class="h">Left</span><span class="h">Right</span>';
+    NAMES.forEach((n, i) => {
+      const cell = (v) => `<span class="bar"><i class="${v >= 1 ? 'full' : ''}" style="width:${Math.round(v * 100)}%"></i></span>`;
+      bars += `<span>${n}</span>${cell(st.coverage.left[i])}${cell(st.coverage.right[i])}`;
+    });
+    $('bars').innerHTML = bars;
+    if (!boardShown) {
+      $('cols').value = st.pattern.cols; $('rows').value = st.pattern.rows; $('square').value = st.pattern.square_mm;
+      boardShown = true;
+    }
+    showJob(st.job);
+  } catch (e) { $('hold').textContent = 'Page offline: retrying'; $('hold').className = 'hold no'; }
+}
+
+function showJob(job) {
+  const key = job.status + job.message;
+  if (key === lastJob) return;
+  lastJob = key;
+  note('jobMsg', job.message, job.status === 'error');
+  $('save').disabled = job.status !== 'done';
+  if (job.status !== 'done' || !job.summary) { $('result').hidden = true; return; }
+  const s = job.summary;
+  const rows = [
+    ['Quality', s.grade],
+    ['Samples used', s.samples],
+    ['Dropped', s.dropped.length ? s.dropped.map(([n, why]) => `#${n} (${why})`).join(', ') : 'none'],
+    ['Reprojection error, left', s.rms_left + ' px'],
+    ['Reprojection error, right', s.rms_right + ' px'],
+    ['Stereo error', s.rms_stereo + ' px'],
+    ['Baseline (lens spacing)', s.baseline_mm + ' mm'],
+    ['Focal length left / right', `${s.fx_left} / ${s.fx_right} px`],
+    ['Rotation between cameras', s.rotation_deg + '°'],
+    ['Offset right vs left (x, y, z)', s.offset_mm.join(', ') + ' mm'],
+    ['Worst remaining samples', s.worst_samples.join(', ')],
+  ];
+  $('resTable').innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+  calibGood = s.good;
+  $('verdict').textContent = s.good
+    ? `Quality: ${s.grade}. Check the rectified image below, then Save & apply.`
+    : (s.warnings.length ? 'Not trustworthy: ' + s.warnings.join('; ') + '. ' : 'Error is high. ')
+      + 'Clear and recapture with the board propped still, within about 0.6 m, with more tilted shots.';
+  $('verdict').className = 'verdict ' + (s.good ? 'good' : 'bad');
+  $('rect').src = '/api/stereo/rectified.jpg?t=' + Date.now();
+  $('result').hidden = false;
+}
+
+// ---------------- actions ----------------
+async function act(path, body, okMsg) {
+  try { const r = await api(path, body || {}); if (okMsg || r.message) note('msg', okMsg || r.message, r.success === false); }
+  catch (e) { note('msg', e.message, true); }
+  poll();
+}
+$('auto').onclick = () => act('/api/stereo/auto', { on: !(st && st.auto) });
+$('capture').onclick = () => act('/api/stereo/capture');
+$('undo').onclick = () => act('/api/stereo/undo', {}, 'Removed the last sample.');
+$('clear').onclick = (e) => {
+  const b = e.currentTarget;
+  if (!b.dataset.armed) {
+    b.dataset.armed = '1'; b.textContent = 'Confirm clear';
+    setTimeout(() => { delete b.dataset.armed; b.textContent = 'Clear all'; }, 3000);
+    return;
+  }
+  act('/api/stereo/clear', {}, 'All samples cleared.');
+};
+$('applyBoard').onclick = () => act('/api/stereo/config',
+  { cols: +$('cols').value, rows: +$('rows').value, square_mm: +$('square').value }, 'Board updated.');
+$('compute').onclick = () => { lastJob = ''; act('/api/stereo/compute'); };
+$('check').onclick = () => {
+  if (!st || st.job.status !== 'done') { note('jobMsg', 'Calibrate first.', true); return; }
+  note('jobMsg', 'Grabbing a live pair…');
+  const img = new Image();
+  img.onload = () => { $('rect').src = img.src; note('jobMsg', 'Live rectified view updated.'); };
+  img.onerror = () => note('jobMsg', 'Could not grab a live pair.', true);
+  img.src = '/api/stereo/rectified.jpg?fresh=1&t=' + Date.now();
+};
+$('save').onclick = async (e) => {
+  const b = e.currentTarget;
+  if (!calibGood && !b.dataset.armed) {
+    b.dataset.armed = '1'; b.textContent = 'Save anyway?';
+    note('jobMsg', "This calibration failed its checks. Click again to save it anyway.", true);
+    setTimeout(() => { delete b.dataset.armed; b.textContent = 'Save & apply'; }, 4000);
+    return;
+  }
+  $('save').disabled = true;
+  try { const r = await api('/api/stereo/save', {}); note('jobMsg', r.message, !r.success); }
+  catch (e) { note('jobMsg', e.message, true); $('save').disabled = false; }
+};
+
+async function loadSessions() {
+  try {
+    const { sessions } = await api('/api/stereo/sessions');
+    $('sessions').innerHTML = sessions.length
+      ? sessions.map((x) => `<option value="${x.name}">${x.name.replace('session_', '')} · ${x.samples} samples</option>`).join('')
+      : '<option value="">none yet</option>';
+    $('loadSession').disabled = !sessions.length;
+  } catch (e) { /* page offline */ }
+}
+$('loadSession').onclick = async () => {
+  lastJob = ''; boardShown = false;
+  try { const r = await api('/api/stereo/load', { session: $('sessions').value }); note('msg', r.message); }
+  catch (e) { note('msg', e.message, true); }
+  poll();
+};
+loadSessions();
+poll(); setInterval(poll, 300);
+</script>
+</body>
+</html>

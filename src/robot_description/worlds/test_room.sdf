@@ -1,0 +1,92 @@
+<?xml version="1.0"?>
+<!-- 6 x 5 m room with a few obstacles for the lidar and cameras to see. -->
+<sdf version="1.8">
+  <world name="test_room">
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.002</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+    <plugin filename="ignition-gazebo-physics-system" name="ignition::gazebo::systems::Physics"/>
+    <plugin filename="ignition-gazebo-user-commands-system" name="ignition::gazebo::systems::UserCommands"/>
+    <plugin filename="ignition-gazebo-scene-broadcaster-system" name="ignition::gazebo::systems::SceneBroadcaster"/>
+    <plugin filename="ignition-gazebo-sensors-system" name="ignition::gazebo::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <scene>
+      <ambient>0.6 0.6 0.6 1</ambient>
+      <background>0.75 0.8 0.85 1</background>
+      <grid>false</grid>
+    </scene>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.4 0.2 -0.9</direction>
+    </light>
+
+    <model name="ground">
+      <static>true</static>
+      <link name="link">
+        <collision name="c">
+          <geometry><plane><normal>0 0 1</normal><size>20 20</size></plane></geometry>
+          <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+        </collision>
+        <visual name="v">
+          <geometry><plane><normal>0 0 1</normal><size>20 20</size></plane></geometry>
+          <material><ambient>0.55 0.52 0.48 1</ambient><diffuse>0.55 0.52 0.48 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="walls">
+      <static>true</static>
+      <link name="link">
+        <collision name="north"><pose>0 2.5 0.4 0 0 0</pose><geometry><box><size>6.1 0.1 0.8</size></box></geometry></collision>
+        <visual name="north"><pose>0 2.5 0.4 0 0 0</pose><geometry><box><size>6.1 0.1 0.8</size></box></geometry>
+          <material><ambient>0.85 0.85 0.8 1</ambient><diffuse>0.85 0.85 0.8 1</diffuse></material></visual>
+        <collision name="south"><pose>0 -2.5 0.4 0 0 0</pose><geometry><box><size>6.1 0.1 0.8</size></box></geometry></collision>
+        <visual name="south"><pose>0 -2.5 0.4 0 0 0</pose><geometry><box><size>6.1 0.1 0.8</size></box></geometry>
+          <material><ambient>0.85 0.85 0.8 1</ambient><diffuse>0.85 0.85 0.8 1</diffuse></material></visual>
+        <collision name="east"><pose>3 0 0.4 0 0 0</pose><geometry><box><size>0.1 5.1 0.8</size></box></geometry></collision>
+        <visual name="east"><pose>3 0 0.4 0 0 0</pose><geometry><box><size>0.1 5.1 0.8</size></box></geometry>
+          <material><ambient>0.7 0.78 0.85 1</ambient><diffuse>0.7 0.78 0.85 1</diffuse></material></visual>
+        <collision name="west"><pose>-3 0 0.4 0 0 0</pose><geometry><box><size>0.1 5.1 0.8</size></box></geometry></collision>
+        <visual name="west"><pose>-3 0 0.4 0 0 0</pose><geometry><box><size>0.1 5.1 0.8</size></box></geometry>
+          <material><ambient>0.85 0.75 0.65 1</ambient><diffuse>0.85 0.75 0.65 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <model name="crate">
+      <static>true</static>
+      <pose>1.4 0.6 0.2 0 0 0.4</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.4 0.4 0.4</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.4 0.4 0.4</size></box></geometry>
+          <material><ambient>0.75 0.45 0.15 1</ambient><diffuse>0.75 0.45 0.15 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <model name="barrel">
+      <static>true</static>
+      <pose>-1.2 -1.0 0.3 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.2</radius><length>0.6</length></cylinder></geometry></collision>
+        <visual name="v"><geometry><cylinder><radius>0.2</radius><length>0.6</length></cylinder></geometry>
+          <material><ambient>0.15 0.35 0.7 1</ambient><diffuse>0.15 0.35 0.7 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <model name="divider">
+      <static>true</static>
+      <pose>0.2 -1.4 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.2 0.08 0.5</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1.2 0.08 0.5</size></box></geometry>
+          <material><ambient>0.3 0.6 0.35 1</ambient><diffuse>0.3 0.6 0.35 1</diffuse></material></visual>
+      </link>
+    </model>
+  </world>
+</sdf>

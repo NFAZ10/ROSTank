@@ -1,0 +1,757 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Robot Control</title>
+<style>
+:root {
+  --bg: #f3f4f1; --panel: #ffffff; --ink: #1d2320; --muted: #66706a; --line: #dde1dc;
+  --accent: #1f7a5a; --accent-ink: #ffffff; --danger: #c2372b; --warn: #b7791f;
+  --map-free: #ffffff; --map-occ: #1d2320; --map-unknown: #d9ddd6; --grid: rgba(0,0,0,.07);
+  --scan: #e0452f; --robot: #1f7a5a; --goal: #2f6fd6;
+  --radius: 10px; --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121614; --panel: #1b201d; --ink: #e6ebe7; --muted: #95a09a; --line: #2c332f;
+    --accent: #3fb58a; --accent-ink: #08130e; --danger: #ef6b5e; --warn: #e3a948;
+    --map-free: #2a312d; --map-occ: #e6ebe7; --map-unknown: #181c1a; --grid: rgba(255,255,255,.06);
+    --scan: #ff6b52; --robot: #3fb58a; --goal: #6ea2ff;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.4 var(--font); }
+/* One screen: header, then map (fills the rest) beside a fixed sidebar whose tab panel scrolls. */
+html, body { height: 100%; }
+body { display: flex; flex-direction: column; }
+header {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px;
+  padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+  position: sticky; top: 0; z-index: 5;
+}
+header h1 { font-size: 17px; margin: 0 8px 0 0; letter-spacing: .01em; }
+.pill { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--line); }
+.dot.ok { background: var(--accent); } .dot.bad { background: var(--danger); } .dot.busy { background: var(--warn); }
+.pill b { color: var(--ink); font-weight: 600; }
+header .estop { margin-left: auto; }
+
+main { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 380px; grid-template-rows: minmax(0, 1fr); gap: 12px; padding: 12px 16px; }
+@media (max-width: 900px) {
+  main { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; flex: none; }
+  .panel { overflow: visible; }
+  .mapwrap { height: 55vh; }
+}
+
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
+.card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
+.side { display: flex; flex-direction: column; gap: 10px; min-width: 0; min-height: 0; }
+.tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; padding: 4px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+.tabs button { border: 0; background: transparent; padding: 8px 4px; font-size: 13.5px; color: var(--muted); }
+.tabs button[aria-selected="true"] { background: var(--bg); color: var(--ink); box-shadow: inset 0 -2px 0 var(--accent); }
+.panel { flex: 1; min-height: 0; overflow-y: auto; }
+.panel[hidden] { display: none; }
+.panel > * + * { margin-top: 12px; }
+.links { display: grid; gap: 8px; }
+.links a { display: block; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px;
+  color: var(--ink); text-decoration: none; font-weight: 600; font-size: 14px; }
+.links a:hover { border-color: var(--muted); }
+.links a span { display: block; font-weight: 400; font-size: 12.5px; color: var(--muted); }
+.navcard { padding: 10px 12px; }
+.navcard .navstatus { margin-bottom: 0; }
+.navcard .msg { margin-top: 6px; min-height: 0; }
+
+.mapwrap { position: relative; padding: 0; overflow: hidden; height: 100%; min-height: 300px; }
+canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.maptools {
+  position: absolute; top: 10px; left: 10px; right: 10px; display: flex; flex-wrap: wrap; gap: 6px;
+  pointer-events: none;
+}
+.maptools > * { pointer-events: auto; }
+.maptools .spacer { flex: 1; }
+.maphint {
+  position: absolute; bottom: 10px; left: 10px; right: 10px; font-size: 12.5px; color: var(--muted);
+  pointer-events: none; text-shadow: 0 0 4px var(--panel);
+}
+
+button {
+  font: inherit; font-weight: 600; font-size: 14px; color: var(--ink); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; cursor: pointer;
+  touch-action: manipulation; user-select: none; -webkit-user-select: none;
+}
+button:hover { border-color: var(--muted); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+button.danger { background: var(--danger); color: #fff; border-color: var(--danger); }
+button.on { background: var(--goal); color: #fff; border-color: var(--goal); }
+.maptools button { background: var(--panel); box-shadow: 0 1px 3px rgba(0,0,0,.12); padding: 7px 10px; }
+.maptools button.on { background: var(--goal); }
+
+.row { display: flex; flex-wrap: wrap; gap: 8px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.msg { font-size: 13px; color: var(--muted); margin-top: 10px; min-height: 1.4em; overflow-wrap: anywhere; }
+.msg.err { color: var(--danger); }
+
+.pad { display: grid; grid-template-columns: repeat(3, 64px); grid-template-rows: repeat(3, 52px); gap: 6px; justify-content: center; }
+.pad button { font-size: 20px; padding: 0; }
+.pad button:active, .pad button.held { background: var(--accent); color: var(--accent-ink); }
+label.slider { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
+label.slider input { flex: 1; accent-color: var(--accent); }
+
+.step { border-top: 1px solid var(--line); padding: 12px 0 2px; }
+.step:first-of-type { border-top: 0; padding-top: 0; }
+.step h3 { font-size: 14.5px; margin: 0 0 4px; }
+.step p { margin: 0 0 8px; font-size: 13px; color: var(--muted); }
+.field { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; }
+.field input[type=number] {
+  width: 96px; font: inherit; padding: 7px 8px; border-radius: 7px; border: 1px solid var(--line);
+  background: var(--bg); color: var(--ink);
+}
+.checks { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; margin: 6px 0 8px; }
+.checks input { accent-color: var(--accent); }
+.result { font-size: 13px; margin-top: 6px; font-variant-numeric: tabular-nums; }
+.result b { font-weight: 600; }
+.seg { margin-bottom: 8px; }
+.seg button { padding: 6px 12px; font-size: 13px; }
+.camview {
+  position: relative; aspect-ratio: 4 / 3; background: var(--map-unknown); border-radius: 8px; overflow: hidden;
+  display: grid; place-items: center;
+}
+.camview img { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; object-fit: contain; }
+.camview span { font-size: 13px; color: var(--muted); }
+.camview.live span { display: none; }
+.sub { margin: -4px 0 10px; font-size: 13px; color: var(--muted); }
+.values { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; margin-bottom: 10px; }
+.values b { color: var(--ink); }
+
+.navstatus { font-size: 13.5px; padding: 8px 10px; border-radius: 8px; background: var(--bg); margin-bottom: 10px; }
+.navstatus b { font-weight: 600; }
+.navstatus.warn { box-shadow: inset 3px 0 0 var(--warn); }
+.navstatus.ok { box-shadow: inset 3px 0 0 var(--accent); }
+.navstatus.err { box-shadow: inset 3px 0 0 var(--danger); }
+.savemap { display: flex; gap: 8px; margin-top: 8px; }
+.savemap input { flex: 1; min-width: 0; font: inherit; padding: 8px 10px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
+.savemap input:invalid { border-color: var(--danger); }
+.maplist-h { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 14px 0 8px; }
+.maplist { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.maplist li { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 4px 10px; align-items: center;
+  padding: 8px; border: 1px solid var(--line); border-radius: 8px; }
+.maplist li.current { border-color: var(--accent); }
+.maplist li.empty { display: block; font-size: 13px; color: var(--muted); border-style: dashed; }
+.maplist img { width: 64px; height: 64px; object-fit: contain; background: var(--map-unknown); border-radius: 6px;
+  grid-row: span 2; image-rendering: pixelated; }
+.maplist .meta { min-width: 0; font-size: 12.5px; color: var(--muted); }
+.maplist .meta b { display: block; color: var(--ink); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.maplist .acts { display: flex; gap: 6px; }
+.maplist .acts button { padding: 6px 10px; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Robot</h1>
+  <span class="pill"><span class="dot" id="dStack"></span>Stack <b id="tStack">…</b></span>
+  <span class="pill"><span class="dot" id="dMode"></span>Mode <b id="tMode">…</b></span>
+  <span class="pill"><span class="dot" id="dPico"></span>Drive</span>
+  <span class="pill"><span class="dot" id="dLidar"></span>Lidar</span>
+  <span class="pill" title="Pack voltage and approximate charge (LiFePO4)"><span class="dot" id="dBatt"></span>Battery <b id="tBatt">—</b></span>
+  <button class="danger estop" id="estop">STOP</button>
+</header>
+
+<main>
+  <section class="card mapwrap">
+    <canvas id="map"></canvas>
+    <div class="maptools">
+      <button id="toolGoal" title="Drag on the map: where to go, and which way to face">Goal</button>
+      <button id="toolPose" title="Drag on the map: where the robot really is, and which way it faces">Set pose</button>
+      <span class="spacer"></span>
+      <button id="follow" class="on" title="Keep the robot centred">Follow</button>
+      <button id="zoomOut" aria-label="Zoom out">−</button>
+      <button id="zoomIn" aria-label="Zoom in">+</button>
+    </div>
+    <div class="maphint" id="hint"></div>
+  </section>
+
+  <div class="side">
+    <section class="card navcard" aria-live="polite">
+      <div class="navstatus" id="navStatus">…</div>
+      <div class="msg" id="navMsg"></div>
+    </section>
+
+    <nav class="tabs" role="tablist" aria-label="Controls">
+      <button role="tab" data-tab="drive" aria-selected="true">Drive</button>
+      <button role="tab" data-tab="maps" aria-selected="false">Maps</button>
+      <button role="tab" data-tab="robot" aria-selected="false">Robot</button>
+      <button role="tab" data-tab="calib" aria-selected="false">Calibrate</button>
+    </nav>
+
+    <section class="card panel" data-panel="drive" role="tabpanel">
+      <div>
+        <div class="row seg">
+          <button data-cam="left" class="on">Left camera</button>
+          <button data-cam="right">Right</button>
+          <button data-cam="depth" title="Stereo depth: red near, blue far, black unknown">Depth</button>
+          <button data-cam="">Off</button>
+        </div>
+        <div class="camview"><img id="cam" alt=""><span id="camMsg">Connecting…</span></div>
+      </div>
+      <div class="pad">
+        <span></span><button data-drive="1,0" aria-label="Forward">▲</button><span></span>
+        <button data-drive="0,1" aria-label="Turn left">◀</button>
+        <button data-halt aria-label="Stop">■</button>
+        <button data-drive="0,-1" aria-label="Turn right">▶</button>
+        <span></span><button data-drive="-1,0" aria-label="Back">▼</button><span></span>
+      </div>
+      <label class="slider">Speed <input type="range" id="speed" min="0.05" max="0.4" step="0.01" value="0.2"> <span id="speedVal">0.20 m/s</span></label>
+      <div class="msg" style="margin-top:6px">Hold a button, or use the arrow keys / WASD. The robot slows near obstacles and stops 12 cm short.</div>
+      <div class="msg" id="guardMsg" style="margin-top:0"></div>
+    </section>
+
+    <section class="card panel" data-panel="maps" role="tabpanel" hidden>
+      <div class="grid2">
+        <button class="primary" data-nav="start_mapping">Start mapping</button>
+        <button class="danger" data-nav="stop">Stop</button>
+      </div>
+      <button data-nav="start_exploring" style="width:100%" title="Maps on its own: drives to unexplored edges until none are left, then comes back">Explore automatically</button>
+      <form class="savemap" id="saveForm" autocomplete="off">
+        <input id="mapName" type="text" maxlength="40" placeholder="Map name, e.g. kitchen" aria-label="Map name"
+               pattern="[A-Za-z0-9_\-]{1,40}" title="Letters, digits, - or _ (no spaces)">
+        <button type="submit" id="saveBtn">Save map</button>
+      </form>
+      <h3 class="maplist-h">Saved maps</h3>
+      <ul class="maplist" id="mapList"><li class="empty">No saved maps yet. Map an area, then save it.</li></ul>
+    </section>
+
+    <section class="card panel" data-panel="robot" role="tabpanel" hidden>
+      <div>
+        <h2>Robot stack</h2>
+        <p class="sub">Drive, lidar, cameras, Foxglove and mapping. This page keeps running when the stack is stopped.</p>
+        <div class="row">
+          <button class="primary" data-stack="start">Start</button>
+          <button data-stack="restart">Restart</button>
+          <button class="danger" data-stack="stop">Stop stack</button>
+        </div>
+        <div class="msg" id="stackMsg"></div>
+        <p class="sub" id="idleMsg"></p>
+      </div>
+      <div class="links">
+        <a href="/encoders">Encoders →<span>Live track counts and speeds, spin one track</span></a>
+        <a href="/calibrate">Camera calibration →<span>Stereo checkerboard calibration</span></a>
+      </div>
+    </section>
+
+    <section class="card panel" data-panel="calib" role="tabpanel" hidden>
+      <div class="values" id="calibValues">Reading drive settings…</div>
+
+      <div class="step">
+        <h3>1 · Track direction</h3>
+        <p>Lift the tracks off the ground. Each button runs one track forward for 2 s.</p>
+        <div class="row">
+          <button data-test="left">Run left track</button>
+          <button data-test="right">Run right track</button>
+        </div>
+        <p style="margin-top:10px">If a track ran backwards or the wrong side moved, fix it here:</p>
+        <div class="checks">
+          <label><input type="checkbox" id="invert_left"> Invert left</label>
+          <label><input type="checkbox" id="invert_right"> Invert right</label>
+          <label><input type="checkbox" id="swap_sides"> Swap sides</label>
+        </div>
+        <button id="applyDir">Apply</button>
+      </div>
+
+      <div class="step">
+        <h3>2 · Drive 1 m straight</h3>
+        <p>On the floor with 1.5 m clear in front. Mark the start, run, then measure how far it really went.</p>
+        <button data-test="straight">Run 1 m</button>
+        <div class="result" id="straightResult"></div>
+        <div class="field">Measured <input type="number" id="measuredDist" step="0.01" min="0.1" placeholder="1.00"> m</div>
+        <div class="result" id="radiusSuggest"></div>
+        <button id="applyRadius" disabled>Apply wheel radius</button>
+      </div>
+
+      <div class="step">
+        <h3>3 · Spin 360°</h3>
+        <p>Do step 2 first. Mark the heading, run, then estimate how far it really turned.</p>
+        <button data-test="spin">Run 360°</button>
+        <div class="result" id="spinResult"></div>
+        <div class="field">Turned <input type="number" id="measuredDeg" step="1" min="30" placeholder="360"> °</div>
+        <div class="result" id="widthSuggest"></div>
+        <button id="applyWidth" disabled>Apply track width</button>
+      </div>
+      <div class="msg" id="testMsg"></div>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const ROBOT_L = 0.30, ROBOT_W = 0.23;
+
+async function api(path, body) {
+  const opts = body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+
+// ---------------- state ----------------
+let state = null, scan = null, map = null, mapSeq = -1, calib = null;
+let lastStraight = null, lastSpin = null, lastTestKey = '';
+
+function setDot(id, cls) { $(id).className = 'dot ' + cls; }
+
+async function pollState() {
+  try {
+    state = await api('/api/state');
+    $('tStack').textContent = state.stack;
+    if (state.idle && state.idle.timeout > 0) {
+      $('idleMsg').textContent = `Auto-stops after ${Math.round(state.idle.timeout / 60)} min with no driving, `
+        + `mapping or viewers (this page, Foxglove). Last activity: ${state.idle.reason}.`;
+    }
+    setDot('dStack', state.stack === 'active' ? 'ok' : (/activating|deactivating|reloading/.test(state.stack) ? 'busy' : 'bad'));
+    document.querySelector('[data-stack="start"]').disabled = state.stack === 'active';
+    document.querySelector('[data-stack="stop"]').disabled = state.stack === 'inactive' || state.stack === 'failed';
+    $('tMode').textContent = state.mode;
+    setDot('dMode', state.mode === 'idle' ? 'ok' : (state.mode === 'off' || state.mode === 'unknown' ? 'bad' : 'busy'));
+    setDot('dPico', state.pico ? 'ok' : 'bad');
+    setDot('dLidar', state.lidar ? 'ok' : 'busy');
+    if (state.calib && Object.keys(state.calib).length) showCalib(state.calib);
+    if (state.map_seq && state.map_seq !== mapSeq) loadMap(state.map_seq);
+    if (!state.map_seq && map) { map = null; mapSeq = -1; }
+    showTest(state.test);
+    showNav(state);
+    const b = state.battery || {};
+    $('tBatt').textContent = b.present ? `${b.voltage.toFixed(1)} V · ${b.percent}%` : '—';
+    setDot('dBatt', !b.present ? '' : /critical|shutting/.test(b.status) ? 'bad' : /low/.test(b.status) ? 'busy' : 'ok');
+    const g = state.guard || '';
+    $('guardMsg').textContent = /stopped|slowing|waiting/.test(g) ? 'Guard: ' + g : '';
+    $('guardMsg').classList.toggle('err', g.startsWith('stopped'));
+  } catch (e) {
+    $('tStack').textContent = 'page offline'; setDot('dStack', 'bad');
+    $('tMode').textContent = '—'; setDot('dMode', ''); setDot('dPico', ''); setDot('dLidar', '');
+  }
+}
+
+async function pollScan() {
+  if (document.visibilityState !== 'visible') return;
+  try { const s = await api('/api/scan'); scan = s.ok ? s : null; } catch (e) { scan = null; }
+}
+
+async function loadMap(seq) {
+  try {
+    const m = await api('/api/map');
+    const bytes = Uint8Array.from(atob(m.data), (c) => c.charCodeAt(0));
+    const c = document.createElement('canvas');
+    c.width = m.width; c.height = m.height;
+    const ctx = c.getContext('2d');
+    const img = ctx.createImageData(m.width, m.height);
+    const rgb = (hex) => { const v = parseInt(hex.replace('#', ''), 16); return [v >> 16 & 255, v >> 8 & 255, v & 255]; };
+    const free = rgb(css('--map-free')), occ = rgb(css('--map-occ')), unk = rgb(css('--map-unknown'));
+    // Grid row 0 is the bottom (lowest y); image row 0 is the top, so flip rows.
+    for (let row = 0; row < m.height; row++) {
+      for (let col = 0; col < m.width; col++) {
+        const v = bytes[row * m.width + col];
+        const color = v === 255 ? unk : (v >= 50 ? occ : free);
+        const o = ((m.height - 1 - row) * m.width + col) * 4;
+        img.data[o] = color[0]; img.data[o + 1] = color[1]; img.data[o + 2] = color[2]; img.data[o + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    map = { ...m, canvas: c };
+    mapSeq = seq;
+  } catch (e) { /* map not ready */ }
+}
+
+// ---------------- map view ----------------
+const canvas = $('map'), ctx = canvas.getContext('2d');
+let view = { x: 0, y: 0, scale: 80 }, follow = true, tool = null, drag = null;
+
+function resize() {
+  const r = canvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  canvas.width = r.width * dpr; canvas.height = r.height * dpr;
+}
+window.addEventListener('resize', resize);
+
+function toWorld(px, py) {
+  const r = canvas.getBoundingClientRect();
+  return { x: view.x + (px - r.width / 2) / view.scale, y: view.y - (py - r.height / 2) / view.scale };
+}
+
+function draw() {
+  const dpr = window.devicePixelRatio || 1, W = canvas.width / dpr, H = canvas.height / dpr;
+  if (follow && state && state.pose) { view.x = state.pose.x; view.y = state.pose.y; }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = css('--map-unknown'); ctx.fillRect(0, 0, W, H);
+  // world -> screen: x right, y up
+  ctx.setTransform(dpr * view.scale, 0, 0, -dpr * view.scale, dpr * (W / 2 - view.x * view.scale), dpr * (H / 2 + view.y * view.scale));
+  const px = 1 / view.scale;
+
+  if (map && state && state.frame === 'map') {
+    ctx.save();
+    ctx.translate(map.origin.x, map.origin.y); ctx.rotate(map.origin.yaw);
+    ctx.scale(1, -1); // image rows run downward; we flipped them, so un-flip the y axis
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(map.canvas, 0, -map.height * map.resolution, map.width * map.resolution, map.height * map.resolution);
+    ctx.restore();
+  }
+
+  // 1 m grid
+  const tl = toWorld(0, 0), br = toWorld(W, H);
+  ctx.strokeStyle = css('--grid'); ctx.lineWidth = px;
+  ctx.beginPath();
+  for (let x = Math.floor(tl.x); x <= br.x; x++) { ctx.moveTo(x, br.y); ctx.lineTo(x, tl.y); }
+  for (let y = Math.floor(br.y); y <= tl.y; y++) { ctx.moveTo(tl.x, y); ctx.lineTo(br.x, y); }
+  ctx.stroke();
+
+  // lidar
+  if (scan && scan.laser && state && scan.frame === state.frame) {
+    ctx.fillStyle = css('--scan');
+    const L = scan.laser, s = 2.5 * px;
+    for (let i = 0; i < scan.ranges.length; i++) {
+      const r = scan.ranges[i]; if (r === null) continue;
+      const a = L.yaw + scan.angle_min + i * scan.angle_increment;
+      ctx.fillRect(L.x + r * Math.cos(a) - s / 2, L.y + r * Math.sin(a) - s / 2, s, s);
+    }
+  }
+
+  // robot
+  if (state && state.pose) {
+    const p = state.pose;
+    ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.yaw);
+    ctx.fillStyle = css('--robot'); ctx.globalAlpha = .35;
+    ctx.fillRect(-ROBOT_L / 2, -ROBOT_W / 2, ROBOT_L, ROBOT_W);
+    ctx.globalAlpha = 1; ctx.strokeStyle = css('--robot'); ctx.lineWidth = 2 * px;
+    ctx.strokeRect(-ROBOT_L / 2, -ROBOT_W / 2, ROBOT_L, ROBOT_W);
+    ctx.beginPath(); ctx.moveTo(ROBOT_L / 2 + 0.06, 0); ctx.lineTo(ROBOT_L / 2 - 0.04, 0.07); ctx.lineTo(ROBOT_L / 2 - 0.04, -0.07); ctx.closePath();
+    ctx.fillStyle = css('--robot'); ctx.fill();
+    ctx.restore();
+  }
+
+  // goal / pose drag arrow
+  if (drag && drag.tool) {
+    const a = drag.a, b = drag.b || drag.a, yaw = Math.atan2(b.y - a.y, b.x - a.x);
+    ctx.strokeStyle = ctx.fillStyle = css('--goal'); ctx.lineWidth = 3 * px;
+    ctx.beginPath(); ctx.arc(a.x, a.y, 8 * px, 0, 2 * Math.PI); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(a.x + 0.4 * Math.cos(yaw), a.y + 0.4 * Math.sin(yaw)); ctx.stroke();
+  }
+  requestAnimationFrame(draw);
+}
+
+function updateHint() {
+  let h = '';
+  if (tool === 'goal') h = 'Goal: press where the robot should go and drag the way it should face.';
+  else if (tool === 'pose') h = 'Set pose: press where the robot really is and drag the way it faces.';
+  else if (state && state.mode === 'navigating' && !state.localized) h = 'Press Set pose, then press where the robot really is and drag the way it faces.';
+  else if (!state || state.frame !== 'map') h = 'No map yet. Press Start mapping. Grid squares are 1 m.';
+  else h = 'Drag to pan, scroll or +/− to zoom. Grid squares are 1 m.';
+  $('hint').textContent = h;
+}
+
+function setTool(t) {
+  tool = tool === t ? null : t;
+  $('toolGoal').classList.toggle('on', tool === 'goal');
+  $('toolPose').classList.toggle('on', tool === 'pose');
+  updateHint();
+}
+$('toolGoal').onclick = () => setTool('goal');
+$('toolPose').onclick = () => setTool('pose');
+$('follow').onclick = () => { follow = !follow; $('follow').classList.toggle('on', follow); };
+$('zoomIn').onclick = () => { view.scale = Math.min(400, view.scale * 1.3); };
+$('zoomOut').onclick = () => { view.scale = Math.max(10, view.scale / 1.3); };
+canvas.addEventListener('wheel', (e) => { e.preventDefault(); view.scale = Math.max(10, Math.min(400, view.scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15))); }, { passive: false });
+
+canvas.addEventListener('pointerdown', (e) => {
+  canvas.setPointerCapture(e.pointerId);
+  const w = toWorld(e.offsetX, e.offsetY);
+  drag = tool ? { tool, a: w } : { pan: true, sx: e.offsetX, sy: e.offsetY, vx: view.x, vy: view.y };
+});
+canvas.addEventListener('pointermove', (e) => {
+  if (!drag) return;
+  if (drag.tool) drag.b = toWorld(e.offsetX, e.offsetY);
+  else {
+    follow = false; $('follow').classList.remove('on');
+    view.x = drag.vx - (e.offsetX - drag.sx) / view.scale;
+    view.y = drag.vy + (e.offsetY - drag.sy) / view.scale;
+  }
+});
+canvas.addEventListener('pointerup', async () => {
+  const d = drag; drag = null;
+  if (!d || !d.tool) return;
+  const b = d.b || d.a;
+  let yaw = Math.atan2(b.y - d.a.y, b.x - d.a.x);
+  if (Math.hypot(b.x - d.a.x, b.y - d.a.y) < 0.05 && state && state.pose) {
+    yaw = Math.atan2(d.a.y - state.pose.y, d.a.x - state.pose.x); // a tap faces the way it travels
+  }
+  try {
+    await api(d.tool === 'goal' ? '/api/goal' : '/api/initialpose', { x: d.a.x, y: d.a.y, yaw });
+    note('navMsg', d.tool === 'goal' ? 'Goal accepted.' : 'Pose set. Give it a moment to settle, then set a goal.');
+  } catch (e) { note('navMsg', e.message, true); }
+  setTool(d.tool);
+});
+
+// ---------------- mapping / navigation ----------------
+function note(id, text, err) { $(id).textContent = text; $(id).classList.toggle('err', !!err); }
+
+document.querySelectorAll('[data-nav]').forEach((btn) => {
+  btn.onclick = async () => {
+    btn.disabled = true; note('navMsg', btn.textContent + '…');
+    try {
+      const r = await api('/api/nav/' + btn.dataset.nav, {});
+      note('navMsg', r.message, !r.success);
+    } catch (e) { note('navMsg', e.message, true); }
+    btn.disabled = false;
+  };
+});
+
+// What navigation is doing, and what the user has to do next.
+function showNav(st) {
+  const el = $('navStatus');
+  let cls = '', html;
+  const g = st.goal || {};
+  if (st.mode === 'off') { html = 'Robot stack is off.'; cls = 'err'; }
+  else if (st.mode === 'mapping') {
+    html = st.localized ? '<b>Mapping.</b> Drive around (or set goals), then name and save the map.'
+      : '<b>Mapping</b> is starting…';
+    cls = st.localized ? 'ok' : 'warn';
+  } else if (st.mode === 'exploring') {
+    html = `<b>Exploring</b> on its own. ${st.explore || ''}`.trim() + '<br>Save the map when it says done, or any time.';
+    cls = 'ok';
+  } else if (st.mode === 'navigating') {
+    html = st.localized ? `<b>Navigating</b> on “${st.nav_map}”. Use Goal on the map.`
+      : `<b>Waiting for pose</b> on “${st.nav_map}”. Use <b>Set pose</b> on the map to show where the robot is.`;
+    cls = st.localized ? 'ok' : 'warn';
+  } else { html = 'Idle. Start mapping, or pick a saved map below.'; }
+  if (st.mode === 'mapping' || st.mode === 'navigating') {
+    if (g.status === 'active') html += `<br>Driving to goal${g.distance != null ? `: <b>${g.distance.toFixed(1)} m</b> to go` : '…'}`;
+    else if (g.status === 'succeeded') html += '<br>Goal reached.';
+    else if (g.status === 'failed' || g.status === 'rejected') { html += `<br>${g.message}`; cls = 'err'; }
+  }
+  el.innerHTML = html; el.className = 'navstatus ' + cls;
+  $('saveBtn').disabled = !['mapping', 'exploring'].includes(st.mode);
+  $('mapName').disabled = !['mapping', 'exploring'].includes(st.mode);
+  document.querySelectorAll('.maplist li[data-map]').forEach((li) =>
+    li.classList.toggle('current', st.mode === 'navigating' && li.dataset.map === st.nav_map));
+}
+
+// ---------------- saved maps ----------------
+const fmtDate = (t) => new Date(t * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+async function loadMaps() {
+  try {
+    const { maps } = await api('/api/maps');
+    const ul = $('mapList');
+    if (!maps.length) { ul.innerHTML = '<li class="empty">No saved maps yet. Map an area, then save it.</li>'; return; }
+    ul.innerHTML = '';
+    for (const m of maps) {
+      const li = document.createElement('li');
+      li.dataset.map = m.name;
+      const size = m.size_m ? `${m.size_m[0]} × ${m.size_m[1]} m · ` : '';
+      li.innerHTML = `<img alt="" src="/api/maps/${encodeURIComponent(m.name)}.png?t=${m.modified}">
+        <div class="meta"><b></b>${size}${fmtDate(m.modified)}${m.has_pose ? ' · remembers robot pose' : ''}</div>
+        <div class="acts"><button class="primary" data-act="navigate">Navigate</button><button data-act="delete">Delete</button></div>`;
+      li.querySelector('b').textContent = m.name + (m.latest ? ' (latest)' : '');
+      li.querySelector('[data-act="navigate"]').onclick = () => mapAction('navigate', m.name);
+      li.querySelector('[data-act="delete"]').onclick = (e) => {
+        const b = e.currentTarget;
+        if (b.dataset.armed) { mapAction('delete', m.name); return; }
+        b.dataset.armed = '1'; b.textContent = 'Confirm delete'; b.classList.add('danger');
+        setTimeout(() => { delete b.dataset.armed; b.textContent = 'Delete'; b.classList.remove('danger'); }, 3000);
+      };
+      ul.appendChild(li);
+    }
+    if (state) showNav(state);
+  } catch (e) { /* page offline: keep the last list */ }
+}
+async function mapAction(act, name) {
+  note('navMsg', (act === 'navigate' ? 'Starting navigation on ' : 'Deleting ') + name + '…');
+  try {
+    const r = await api('/api/maps/' + act, { name });
+    note('navMsg', r.message, !r.success);
+  } catch (e) { note('navMsg', e.message, true); }
+  loadMaps();
+}
+$('saveForm').onsubmit = async (e) => {
+  e.preventDefault();
+  if (!$('mapName').checkValidity()) { note('navMsg', 'Map names: letters, digits, - or _ (no spaces).', true); return; }
+  $('saveBtn').disabled = true; note('navMsg', 'Saving…');
+  try {
+    const r = await api('/api/maps/save', { name: $('mapName').value });
+    note('navMsg', r.message, !r.success);
+    if (r.success) $('mapName').value = '';
+  } catch (err) { note('navMsg', err.message, true); }
+  loadMaps();
+};
+loadMaps();
+
+// ---------------- camera ----------------
+let camSide = 'left', camRetry = null;
+
+// ---------------- tabs ----------------
+let currentTab = 'drive';
+function showTab(name) {
+  if (!document.querySelector(`[data-panel="${name}"]`)) name = 'drive';
+  currentTab = name;
+  document.querySelectorAll('[data-tab]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
+  document.querySelectorAll('[data-panel]').forEach((p) => { p.hidden = p.dataset.panel !== name; });
+  try { localStorage.setItem('robotTab', name); } catch (e) { /* storage blocked: fine */ }
+  camStart();  // the camera only streams while the Drive tab shows it
+}
+document.querySelectorAll('[data-tab]').forEach((b) => { b.onclick = () => showTab(b.dataset.tab); });
+function camStart() {
+  clearTimeout(camRetry);
+  const img = $('cam'), view = img.parentElement;
+  view.classList.remove('live');
+  if (!camSide || document.visibilityState !== 'visible' || currentTab !== 'drive') {
+    img.removeAttribute('src'); $('camMsg').textContent = camSide ? 'Paused' : 'Camera off';
+    return;
+  }
+  $('camMsg').textContent = 'Connecting…';
+  img.src = '/stream/' + camSide + '?t=' + Date.now();
+}
+$('cam').onload = () => $('cam').parentElement.classList.add('live');
+$('cam').onerror = () => {
+  $('cam').parentElement.classList.remove('live');
+  $('camMsg').textContent = 'No image (is the stack running?) Retrying…';
+  camRetry = setTimeout(camStart, 3000);
+};
+document.querySelectorAll('[data-cam]').forEach((btn) => {
+  btn.onclick = () => {
+    camSide = btn.dataset.cam;
+    document.querySelectorAll('[data-cam]').forEach((b) => b.classList.toggle('on', b === btn));
+    camStart();
+  };
+});
+document.addEventListener('visibilitychange', camStart);
+
+// ---------------- robot stack ----------------
+document.querySelectorAll('[data-stack]').forEach((btn) => {
+  btn.onclick = async () => {
+    const action = btn.dataset.stack;
+    if (action === 'stop' && !confirm('Stop the robot stack? Drive, lidar, cameras and mapping all shut down.')) return;
+    note('stackMsg', action + '…');
+    try {
+      const r = await api('/api/stack/' + action, {});
+      note('stackMsg', r.message, !r.success);
+    } catch (e) { note('stackMsg', e.message, true); }
+  };
+});
+
+// ---------------- drive ----------------
+let driveTimer = null, driveBtn = null;
+const speed = () => parseFloat($('speed').value);
+$('speed').oninput = () => { $('speedVal').textContent = speed().toFixed(2) + ' m/s'; };
+
+function startDrive(lin, ang, btn) {
+  stopDrive(false);
+  driveBtn = btn; if (btn) btn.classList.add('held');
+  const send = () => api('/api/drive', { v: lin * speed(), w: ang * speed() * 5 }).catch(() => {});
+  send(); driveTimer = setInterval(send, 100);
+}
+function stopDrive(halt = true) {
+  if (driveTimer) clearInterval(driveTimer);
+  if (driveBtn) driveBtn.classList.remove('held');
+  const wasDriving = !!driveTimer;
+  driveTimer = null; driveBtn = null;
+  if (halt && wasDriving) api('/api/halt', {}).catch(() => {});
+}
+document.querySelectorAll('[data-drive]').forEach((btn) => {
+  const [lin, ang] = btn.dataset.drive.split(',').map(Number);
+  btn.addEventListener('pointerdown', (e) => { e.preventDefault(); startDrive(lin, ang, btn); });
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach((ev) => btn.addEventListener(ev, () => stopDrive()));
+});
+const halt = () => { stopDrive(false); api('/api/halt', {}).catch(() => {}); };
+document.querySelector('[data-halt]').onclick = halt;
+$('estop').onclick = () => { halt(); api('/api/nav/stop', {}).then((r) => note('navMsg', r.message)).catch(() => {}); };
+
+const KEYS = { ArrowUp: [1, 0], w: [1, 0], ArrowDown: [-1, 0], s: [-1, 0], ArrowLeft: [0, 1], a: [0, 1], ArrowRight: [0, -1], d: [0, -1] };
+let keyHeld = null;
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT') return;
+  const k = KEYS[e.key]; if (!k || keyHeld === e.key) return;
+  e.preventDefault(); keyHeld = e.key; startDrive(k[0], k[1], null);
+});
+document.addEventListener('keyup', (e) => { if (e.key === keyHeld) { keyHeld = null; stopDrive(); } });
+window.addEventListener('blur', () => { keyHeld = null; stopDrive(); });
+
+// ---------------- calibration ----------------
+function showCalib(c) {
+  calib = c;
+  $('calibValues').innerHTML = `Wheel radius <b>${c.wheel_radius.toFixed(4)} m</b> · Track width <b>${c.track_width.toFixed(4)} m</b>`;
+  for (const k of ['invert_left', 'invert_right', 'swap_sides']) {
+    if (document.activeElement !== $(k) && !$(k).dataset.dirty) $(k).checked = c[k];
+  }
+  suggest();
+}
+['invert_left', 'invert_right', 'swap_sides'].forEach((k) => { $(k).onchange = () => { $(k).dataset.dirty = '1'; }; });
+
+async function applyCalib(values, label) {
+  try {
+    const c = await api('/api/calib', values);
+    ['invert_left', 'invert_right', 'swap_sides'].forEach((k) => delete $(k).dataset.dirty);
+    showCalib(c); note('testMsg', label + ' saved to drive.yaml and applied.');
+  } catch (e) { note('testMsg', e.message, true); }
+}
+$('applyDir').onclick = () => applyCalib({ invert_left: $('invert_left').checked, invert_right: $('invert_right').checked, swap_sides: $('swap_sides').checked }, 'Direction');
+
+document.querySelectorAll('[data-test]').forEach((btn) => {
+  btn.onclick = async () => {
+    try { await api('/api/test/' + btn.dataset.test, {}); } catch (e) { note('testMsg', e.message, true); }
+  };
+});
+
+function showTest(t) {
+  const running = t.status === 'running';
+  document.querySelectorAll('[data-test]').forEach((b) => { b.disabled = running; });
+  if (!t.name) return;
+  const key = t.name + t.status + t.message;
+  if (key === lastTestKey) return;
+  lastTestKey = key;
+  note('testMsg', running ? t.message : (t.status === 'done' ? '' : `${t.name}: ${t.message}`), t.status === 'error');
+  if (t.status === 'done' && t.result) {
+    if (t.name === 'straight') {
+      lastStraight = t.result;
+      $('straightResult').innerHTML = `Odometry says <b>${t.result.odom_distance.toFixed(3)} m</b>. Now measure the real distance.`;
+    } else if (t.name === 'spin') {
+      lastSpin = t.result;
+      $('spinResult').innerHTML = `Odometry says <b>${Math.abs(t.result.odom_degrees).toFixed(0)}°</b>. How far did it really turn?`;
+    }
+    suggest();
+  }
+}
+
+let newRadius = null, newWidth = null;
+function suggest() {
+  newRadius = newWidth = null;
+  const d = parseFloat($('measuredDist').value);
+  if (calib && lastStraight && d > 0) {
+    newRadius = calib.wheel_radius * d / lastStraight.odom_distance;
+    $('radiusSuggest').innerHTML = `New wheel radius <b>${newRadius.toFixed(4)} m</b> (now ${calib.wheel_radius.toFixed(4)})`;
+  } else $('radiusSuggest').textContent = '';
+  const deg = parseFloat($('measuredDeg').value);
+  if (calib && lastSpin && deg > 0) {
+    newWidth = calib.track_width * Math.abs(lastSpin.odom_degrees) / deg;
+    $('widthSuggest').innerHTML = `New track width <b>${newWidth.toFixed(4)} m</b> (now ${calib.track_width.toFixed(4)})`;
+  } else $('widthSuggest').textContent = '';
+  $('applyRadius').disabled = !newRadius;
+  $('applyWidth').disabled = !newWidth;
+}
+$('measuredDist').oninput = suggest;
+$('measuredDeg').oninput = suggest;
+$('applyRadius').onclick = () => applyCalib({ wheel_radius: newRadius }, 'Wheel radius');
+$('applyWidth').onclick = () => applyCalib({ track_width: newWidth }, 'Track width');
+
+// ---------------- start ----------------
+resize(); updateHint();
+let savedTab = 'drive';
+try { savedTab = localStorage.getItem('robotTab') || 'drive'; } catch (e) { /* storage blocked */ }
+showTab(savedTab);
+pollState(); pollScan();
+setInterval(() => { pollState().then(updateHint); }, 300);
+setInterval(pollScan, 200);
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

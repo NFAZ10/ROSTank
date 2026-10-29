@@ -1,0 +1,60 @@
+diff --git a/include/rf2o_laser_odometry/CLaserOdometry2DNode.hpp b/include/rf2o_laser_odometry/CLaserOdometry2DNode.hpp
+index 8a1e170..55cbd55 100644
+--- a/include/rf2o_laser_odometry/CLaserOdometry2DNode.hpp
++++ b/include/rf2o_laser_odometry/CLaserOdometry2DNode.hpp
+@@ -24,6 +24,7 @@ public:
+   CLaserOdometry2D    rf2o_ref;
+   bool                publish_tf, new_scan_available;
+   double              freq;
++  double              pose_cov_xy, pose_cov_yaw;  // published variances (0 = unset)
+   std::string         laser_scan_topic;
+   std::string         odom_topic;
+   std::string         base_frame_id;
+diff --git a/src/CLaserOdometry2DNode.cpp b/src/CLaserOdometry2DNode.cpp
+index 2206777..437018f 100644
+--- a/src/CLaserOdometry2DNode.cpp
++++ b/src/CLaserOdometry2DNode.cpp
+@@ -39,6 +39,10 @@ CLaserOdometry2DNode::CLaserOdometry2DNode(): Node("CLaserOdometry2DNode")
+   this->get_parameter("init_pose_from_topic", init_pose_from_topic);
+   this->declare_parameter<double>("freq", 10.0);
+   this->get_parameter("freq", freq);
++  this->declare_parameter<double>("pose_covariance_xy", 0.0);
++  this->get_parameter("pose_covariance_xy", pose_cov_xy);
++  this->declare_parameter<double>("pose_covariance_yaw", 0.0);
++  this->get_parameter("pose_covariance_yaw", pose_cov_yaw);
+ 
+   // Init Publishers and Subscribers
+   //---------------------------------
+@@ -97,8 +101,10 @@ void CLaserOdometry2DNode::LaserCallBack(const sensor_msgs::msg::LaserScan::Shar
+     }
+     else
+     {
+-      // Initialize module on first scan (from laser params)
+-      setLaserPoseFromTf();
++      // Initialize module on first scan (from laser params). Without the
++      // base->laser TF the laser pose would silently stay identity, so wait.
++      if (!setLaserPoseFromTf())
++        return;
+       rf2o_ref.init(last_scan, initial_robot_pose.pose.pose);
+       rf2o_ref.first_laser_scan = false;
+     }
+@@ -122,8 +128,8 @@ bool CLaserOdometry2DNode::setLaserPoseFromTf()
+   }
+   catch (tf2::TransformException &ex)
+   {
+-    RCLCPP_ERROR(get_logger(), "%s",ex.what());
+-    retrieved = false;
++    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "waiting for laser TF: %s", ex.what());
++    return false;
+   }
+ 
+   // Keep this transform as Eigen Matrix3d
+@@ -218,6 +224,8 @@ void CLaserOdometry2DNode::publish()
+   odom.pose.pose.position.y = rf2o_ref.robot_pose_.translation()(1);
+   odom.pose.pose.position.z = 0.0;
+   odom.pose.pose.orientation = quaternion;
++  odom.pose.covariance[0] = odom.pose.covariance[7] = pose_cov_xy;
++  odom.pose.covariance[35] = pose_cov_yaw;
+   //set the velocity
+   odom.child_frame_id = base_frame_id;
+   odom.twist.twist.linear.x = rf2o_ref.lin_speed;    //linear speed

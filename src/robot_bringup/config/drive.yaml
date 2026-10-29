@@ -1,0 +1,14 @@
+# Measure these on the robot. track_width is the *effective* value after the
+# 360-degree turn calibration (it ends up larger than the physical width).
+pico_bridge:
+  ros__parameters:
+    port: /dev/pico
+    wheel_radius: 0.03       # drive sprocket pitch radius [m]
+    track_width: 0.1850       # center-to-center of tracks [m]
+    max_wheel_speed: 13.0    # [rad/s], keep equal to MAX_RAD_S in the firmware
+    cmd_timeout: 0.5
+    publish_tf: false        # the EKF (config/ekf.yaml) owns odom->base_link
+    invert_left: false       # track runs backwards on a forward command -> true
+    invert_right: false
+    swap_sides: false        # left command moves the right track -> true
+    battery_scale: 0.9884

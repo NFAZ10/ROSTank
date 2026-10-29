@@ -1,0 +1,179 @@
+<?xml version="1.0"?>
+<!--
+  Tracked robot: two tracks, RPLIDAR A1, IMX219 stereo pair.
+
+  Chassis: aluminium tank kit, 300 x 230 x 124 mm overall, XR25-370 encoder motors.
+  Overall size is from the kit; values marked "est" are estimates to measure.
+  drive.yaml (wheel_radius, track_width) must match them.
+
+  base_link sits on the ground, centred between the tracks (the centre of rotation).
+  sim:=true adds the Gazebo plugins and sensors (robot.gazebo.xacro). Every joint is
+  fixed, so robot_state_publisher needs no joint states.
+-->
+<robot name="tracked_robot" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:arg name="sim" default="false"/>
+  <xacro:property name="sim" value="$(arg sim)"/>
+
+  <!-- Tracks: sprocket radius and centre-to-centre spacing (= drive.yaml) -->
+  <xacro:property name="wheel_radius" value="0.03"/>   <!-- est: measure sprocket -->
+  <xacro:property name="track_width" value="0.185"/>   <!-- 0.23 overall - belt width -->
+  <xacro:property name="track_belt_width" value="0.045"/>   <!-- est -->
+  <xacro:property name="track_length" value="0.30"/>   <!-- overall, end to end -->
+  <!-- Chassis body between the tracks -->
+  <xacro:property name="body_length" value="0.30"/>
+  <xacro:property name="body_width" value="0.14"/>
+  <xacro:property name="body_height" value="0.094"/>
+  <xacro:property name="body_clearance" value="0.03"/>   <!-- top deck at 0.124 -->
+  <xacro:property name="body_mass" value="1.5"/>
+  <!-- Sensor mounts, relative to base_link -->
+  <xacro:property name="laser_x" value="0.0"/>             <!-- est -->
+  <xacro:property name="laser_z" value="0.18"/>          <!-- scan plane height -->
+  <xacro:property name="laser_yaw" value="${pi}"/>        <!-- A1 mounted facing backwards (user, 2026-10-28) -->
+  <xacro:property name="camera_x" value="0.13"/>            <!-- est -->
+  <xacro:property name="camera_z" value="0.07"/>         <!-- lens centres above the floor, measured 2026-10-28 -->
+  <xacro:property name="camera_baseline" value="0.0588"/>        <!-- = right.yaml Tx / fx -->
+
+  <xacro:property name="sprocket_spacing" value="${track_length - 2 * wheel_radius}"/>
+
+  <material name="body"><color rgba="0.20 0.42 0.33 1"/></material>
+  <material name="track"><color rgba="0.12 0.12 0.12 1"/></material>
+  <material name="sensor"><color rgba="0.05 0.05 0.05 1"/></material>
+  <material name="board"><color rgba="0.10 0.45 0.25 1"/></material>
+
+  <xacro:macro name="box_inertia" params="m x y z">
+    <inertial>
+      <mass value="${m}"/>
+      <inertia ixx="${m * (y*y + z*z) / 12}" iyy="${m * (x*x + z*z) / 12}" izz="${m * (x*x + y*y) / 12}"
+               ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </xacro:macro>
+
+  <!-- Inertia of a cylinder whose axis is the link's Y axis (wheels) -->
+  <xacro:macro name="wheel_inertia" params="m r h">
+    <inertial>
+      <mass value="${m}"/>
+      <inertia ixx="${m * (3*r*r + h*h) / 12}" iyy="${m * r * r / 2}" izz="${m * (3*r*r + h*h) / 12}"
+               ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </xacro:macro>
+
+  <link name="base_link"/>
+
+  <link name="chassis">
+    <visual>
+      <geometry><box size="${body_length} ${body_width} ${body_height}"/></geometry>
+      <material name="body"/>
+    </visual>
+    <collision>
+      <geometry><box size="${body_length} ${body_width} ${body_height}"/></geometry>
+    </collision>
+    <xacro:box_inertia m="${body_mass}" x="${body_length}" y="${body_width}" z="${body_height}"/>
+  </link>
+  <joint name="chassis_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="chassis"/>
+    <origin xyz="0 0 ${body_clearance + body_height / 2}"/>
+  </joint>
+
+  <!-- Track belts: a stadium shape. The collision box is what the sim drives on. -->
+  <xacro:macro name="track" params="side y">
+    <link name="track_${side}">
+      <visual>
+        <geometry><box size="${sprocket_spacing} ${track_belt_width} ${2 * wheel_radius}"/></geometry>
+        <material name="track"/>
+      </visual>
+      <visual>
+        <origin xyz="${sprocket_spacing / 2} 0 0" rpy="${pi/2} 0 0"/>
+        <geometry><cylinder radius="${wheel_radius}" length="${track_belt_width}"/></geometry>
+        <material name="track"/>
+      </visual>
+      <visual>
+        <origin xyz="${-sprocket_spacing / 2} 0 0" rpy="${pi/2} 0 0"/>
+        <geometry><cylinder radius="${wheel_radius}" length="${track_belt_width}"/></geometry>
+        <material name="track"/>
+      </visual>
+      <collision>
+        <geometry><box size="${track_length} ${track_belt_width} ${2 * wheel_radius}"/></geometry>
+      </collision>
+      <xacro:box_inertia m="0.2" x="${track_length}" y="${track_belt_width}" z="${2 * wheel_radius}"/>
+    </link>
+    <joint name="track_${side}_joint" type="fixed">
+      <parent link="base_link"/>
+      <child link="track_${side}"/>
+      <origin xyz="0 ${y} ${wheel_radius}"/>
+    </joint>
+  </xacro:macro>
+  <xacro:track side="left" y="${track_width / 2}"/>
+  <xacro:track side="right" y="${-track_width / 2}"/>
+
+  <!-- RPLIDAR A1 on a short mast; the laser frame is the scan plane -->
+  <link name="laser_mast">
+    <visual>
+      <origin xyz="0 0 ${(laser_z - 0.02 - body_clearance - body_height) / 2}"/>
+      <geometry><cylinder radius="0.008" length="${laser_z - 0.02 - body_clearance - body_height}"/></geometry>
+      <material name="sensor"/>
+    </visual>
+  </link>
+  <joint name="laser_mast_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="laser_mast"/>
+    <origin xyz="${laser_x} 0 ${body_clearance + body_height}"/>
+  </joint>
+  <link name="laser">
+    <visual>
+      <geometry><cylinder radius="0.035" length="0.04"/></geometry>
+      <material name="sensor"/>
+    </visual>
+    <collision>
+      <geometry><cylinder radius="0.035" length="0.04"/></geometry>
+    </collision>
+    <xacro:box_inertia m="0.17" x="0.07" y="0.07" z="0.04"/>
+  </link>
+  <joint name="laser_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="laser"/>
+    <origin xyz="${laser_x} 0 ${laser_z}" rpy="0 0 ${laser_yaw}"/>
+  </joint>
+
+  <!-- Stereo pair. stereo_camera is the frame the Argus nodes use as camera link. -->
+  <link name="stereo_camera">
+    <visual>
+      <geometry><box size="0.015 ${camera_baseline + 0.03} 0.025"/></geometry>
+      <material name="board"/>
+    </visual>
+    <xacro:box_inertia m="0.05" x="0.015" y="${camera_baseline + 0.03}" z="0.025"/>
+  </link>
+  <joint name="stereo_camera_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="stereo_camera"/>
+    <origin xyz="${camera_x} 0 ${camera_z}"/>
+  </joint>
+
+  <xacro:macro name="camera_eye" params="side y">
+    <link name="stereo_camera_${side}">
+      <visual>
+        <origin xyz="0.01 0 0" rpy="0 ${pi/2} 0"/>
+        <geometry><cylinder radius="0.006" length="0.008"/></geometry>
+        <material name="sensor"/>
+      </visual>
+    </link>
+    <joint name="stereo_camera_${side}_joint" type="fixed">
+      <parent link="stereo_camera"/>
+      <child link="stereo_camera_${side}"/>
+      <origin xyz="0 ${y} 0"/>
+    </joint>
+    <!-- Optical frame: z forward, x right, y down (what the image headers use) -->
+    <link name="stereo_camera_${side}_optical"/>
+    <joint name="stereo_camera_${side}_optical_joint" type="fixed">
+      <parent link="stereo_camera_${side}"/>
+      <child link="stereo_camera_${side}_optical"/>
+      <origin rpy="${-pi/2} 0 ${-pi/2}"/>
+    </joint>
+  </xacro:macro>
+  <xacro:camera_eye side="left" y="${camera_baseline / 2}"/>
+  <xacro:camera_eye side="right" y="${-camera_baseline / 2}"/>
+
+  <xacro:if value="${sim}">
+    <xacro:include filename="robot.gazebo.xacro"/>
+  </xacro:if>
+</robot>

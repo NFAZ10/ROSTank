@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Robot Encoders</title>
+<style>
+/* Same tokens as index.html, plus one colour per track. */
+:root {
+  --bg: #f3f4f1; --panel: #ffffff; --ink: #1d2320; --muted: #66706a; --line: #dde1dc;
+  --accent: #1f7a5a; --accent-ink: #ffffff; --danger: #c2372b; --warn: #b7791f;
+  --left: #1f7a5a; --right: #2f6fd6; --grid: rgba(0,0,0,.07);
+  --radius: 10px; --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121614; --panel: #1b201d; --ink: #e6ebe7; --muted: #95a09a; --line: #2c332f;
+    --accent: #3fb58a; --accent-ink: #08130e; --danger: #ef6b5e; --warn: #e3a948;
+    --left: #3fb58a; --right: #6ea2ff; --grid: rgba(255,255,255,.06);
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.4 var(--font); }
+header {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+  padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+  position: sticky; top: 0; z-index: 5;
+}
+header h1 { font-size: 17px; margin: 0 8px 0 0; }
+header a { color: var(--muted); font-size: 14px; text-decoration: none; }
+header a:hover { color: var(--ink); }
+.pill { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.pill b { color: var(--ink); font-weight: 600; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--line); }
+.dot.ok { background: var(--accent); } .dot.bad { background: var(--danger); } .dot.busy { background: var(--warn); }
+header .estop { margin-left: auto; }
+
+main { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; padding: 14px 16px; max-width: 1100px; }
+@media (max-width: 760px) { main { grid-template-columns: minmax(0, 1fr); } }
+.wide { grid-column: 1 / -1; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; min-width: 0; }
+.card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px;
+  display: flex; align-items: center; gap: 8px; }
+.card h2 .swatch { width: 12px; height: 4px; border-radius: 2px; }
+.card h2 .pins { margin-left: auto; text-transform: none; letter-spacing: 0; font-family: var(--mono); font-size: 12px; }
+
+.count { font-family: var(--mono); font-size: 44px; font-weight: 600; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.count small { font-size: 14px; color: var(--muted); font-weight: 400; margin-left: 6px; }
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 12px 0 14px; }
+.stats div { font-size: 12px; color: var(--muted); }
+.stats b { display: block; font-family: var(--mono); font-size: 17px; color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.dir { font-size: 13px; color: var(--muted); min-height: 1.4em; margin-top: -6px; margin-bottom: 10px; }
+.dir.fwd { color: var(--accent); } .dir.rev { color: var(--warn); }
+
+button {
+  font: inherit; font-weight: 600; font-size: 14px; color: var(--ink); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; cursor: pointer;
+  touch-action: manipulation; user-select: none; -webkit-user-select: none;
+}
+button:hover { border-color: var(--muted); }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button:disabled { opacity: .45; cursor: default; }
+button.held { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+button.danger { background: var(--danger); color: #fff; border-color: var(--danger); }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.row { display: flex; flex-wrap: wrap; gap: 8px; }
+.row button { flex: 1 1 auto; }
+
+label.slider { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
+label.slider input { flex: 1; accent-color: var(--accent); min-width: 0; }
+label.slider output { font-family: var(--mono); color: var(--ink); min-width: 80px; text-align: right; }
+
+.chartbox { position: relative; height: 240px; }
+canvas { display: block; width: 100%; height: 100%; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12.5px; color: var(--muted); margin-top: 8px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { display: inline-block; width: 18px; height: 0; border-top: 2.5px solid; }
+.legend i.dash { border-top-style: dashed; }
+
+.banner { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 14px;
+  border-radius: var(--radius); border: 1px solid var(--warn); background: var(--panel); font-size: 14px; }
+.banner[hidden] { display: none; }
+.msg { font-size: 13px; color: var(--muted); margin-top: 10px; min-height: 1.4em; overflow-wrap: anywhere; }
+.msg.err { color: var(--danger); }
+ul.tips { margin: 0; padding-left: 18px; font-size: 13.5px; color: var(--muted); display: grid; gap: 6px; }
+ul.tips b { color: var(--ink); font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Encoders</h1>
+  <a href="/">← Control page</a>
+  <span class="pill"><span class="dot" id="dStack"></span>Stack <b id="tStack">…</b></span>
+  <span class="pill"><span class="dot" id="dLive"></span>Encoders <b id="tLive">…</b></span>
+  <button class="danger estop" id="estop">STOP</button>
+</header>
+
+<main>
+  <div class="banner" id="banner" hidden>
+    <span id="bannerText">The robot stack isn't running, so there's no encoder data.</span>
+    <button class="primary" id="startStack">Start stack</button>
+  </div>
+
+  <section class="card" data-side="left">
+    <h2><span class="swatch" style="background: var(--left)"></span>Left track<span class="pins">GP20 / GP21</span></h2>
+    <div class="count"><span data-f="ticks">—</span><small>counts</small></div>
+    <div class="stats">
+      <div>Sprocket turns<b data-f="turns">—</b></div>
+      <div>Speed (rad/s)<b data-f="speed">—</b></div>
+      <div>Commanded<b data-f="target">—</b></div>
+    </div>
+    <div class="dir" data-f="dir"></div>
+    <div class="row">
+      <button data-hold="1">Hold: forward</button>
+      <button data-hold="-1">Hold: reverse</button>
+      <button data-zero>Zero</button>
+    </div>
+  </section>
+
+  <section class="card" data-side="right">
+    <h2><span class="swatch" style="background: var(--right)"></span>Right track<span class="pins">GP14 / GP15</span></h2>
+    <div class="count"><span data-f="ticks">—</span><small>counts</small></div>
+    <div class="stats">
+      <div>Sprocket turns<b data-f="turns">—</b></div>
+      <div>Speed (rad/s)<b data-f="speed">—</b></div>
+      <div>Commanded<b data-f="target">—</b></div>
+    </div>
+    <div class="dir" data-f="dir"></div>
+    <div class="row">
+      <button data-hold="1">Hold: forward</button>
+      <button data-hold="-1">Hold: reverse</button>
+      <button data-zero>Zero</button>
+    </div>
+  </section>
+
+  <section class="card wide">
+    <h2>Speed, last 10 seconds</h2>
+    <div class="chartbox"><canvas id="chart"></canvas></div>
+    <div class="legend">
+      <span><i style="border-color: var(--left)"></i>Left measured</span>
+      <span><i class="dash" style="border-color: var(--left)"></i>Left commanded</span>
+      <span><i style="border-color: var(--right)"></i>Right measured</span>
+      <span><i class="dash" style="border-color: var(--right)"></i>Right commanded</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Test drive</h2>
+    <label class="slider">Sprocket speed <input type="range" id="speed" min="0.5" max="13" step="0.5" value="3"><output id="speedVal">3.0 rad/s</output></label>
+    <div class="row" style="margin-top: 12px">
+      <button data-both="1,1">Both forward</button>
+      <button data-both="-1,-1">Both reverse</button>
+      <button data-both="-1,1">Spin left</button>
+      <button data-both="1,-1">Spin right</button>
+    </div>
+    <div class="msg" id="msg">Buttons run only while held. Lift the robot or take the tracks off first.</div>
+  </section>
+
+  <section class="card">
+    <h2>What to look for</h2>
+    <ul class="tips">
+      <li><b>Turn a sprocket by hand</b> and its count should move. One full sprocket turn is about <b id="tpr">748</b> counts.</li>
+      <li><b>Forward counts up.</b> Turning a track the way the robot drives forward should make the number rise.</li>
+      <li><b>Measured follows commanded.</b> When a motor is held, the solid line should settle on the dashed one. Commanded but flat at zero means the motor isn't turning.</li>
+      <li><b>No count while turning?</b> Check that encoder's plug, its 3.3 V and ground wires.</li>
+    </ul>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const SIDES = ['left', 'right'];
+
+async function api(path, body) {
+  const opts = body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+function note(text, err) { $('msg').textContent = text; $('msg').classList.toggle('err', !!err); }
+function setDot(id, cls) { $(id).className = 'dot ' + cls; }
+
+// ---------------- live values ----------------
+const zero = { left: null, right: null };   // count offsets for the Zero buttons (this page only)
+const history = [];                          // {t, left, right, tl, tr}
+const WINDOW = 10;
+let last = null;
+
+function card(side) { return document.querySelector(`[data-side="${side}"]`); }
+function field(side, f) { return card(side).querySelector(`[data-f="${f}"]`); }
+
+async function pollWheels() {
+  try {
+    const w = await api('/api/wheels');
+    $('tpr').textContent = Math.round(w.ticks_per_rev);
+    $('tLive').textContent = w.live ? 'live' : 'no data';
+    setDot('dLive', w.live ? 'ok' : 'bad');
+    if (!w.live) { last = null; return; }
+    last = w;
+    const t = performance.now() / 1000;
+    history.push({ t, left: w.left.speed, right: w.right.speed, tl: w.left.target, tr: w.right.target });
+    while (history.length && history[0].t < t - WINDOW) history.shift();
+    for (const side of SIDES) {
+      const s = w[side];
+      if (zero[side] === null) zero[side] = { ticks: s.ticks, rad: s.rad };
+      const ticks = s.ticks - zero[side].ticks;
+      field(side, 'ticks').textContent = ticks.toLocaleString('en-US', { signDisplay: 'exceptZero' });
+      field(side, 'turns').textContent = ((s.rad - zero[side].rad) / (2 * Math.PI)).toFixed(2);
+      field(side, 'speed').textContent = s.speed.toFixed(2);
+      field(side, 'target').textContent = s.target.toFixed(2);
+      const dir = field(side, 'dir');
+      const moving = Math.abs(s.speed) > 0.15;
+      dir.textContent = !moving ? (Math.abs(s.target) > 0.1 ? 'Commanded but not turning' : 'Still')
+        : (s.speed > 0 ? 'Turning forward' : 'Turning in reverse');
+      dir.className = 'dir' + (moving ? (s.speed > 0 ? ' fwd' : ' rev') : '');
+    }
+  } catch (e) {
+    $('tLive').textContent = 'page offline'; setDot('dLive', 'bad');
+  }
+}
+
+async function pollState() {
+  try {
+    const st = await api('/api/state');
+    $('tStack').textContent = st.stack;
+    const up = st.stack === 'active';
+    setDot('dStack', up ? 'ok' : (/activating|deactivating/.test(st.stack) ? 'busy' : 'bad'));
+    $('banner').hidden = up;
+    if (!up) $('bannerText').textContent = /activating/.test(st.stack)
+      ? 'The robot stack is starting…' : "The robot stack isn't running, so there's no encoder data.";
+    $('startStack').disabled = st.stack !== 'inactive' && st.stack !== 'failed';
+  } catch (e) {
+    $('tStack').textContent = 'page offline'; setDot('dStack', 'bad');
+  }
+}
+
+document.querySelectorAll('[data-zero]').forEach((btn) => {
+  btn.onclick = () => {
+    const side = btn.closest('[data-side]').dataset.side;
+    if (last) zero[side] = { ticks: last[side].ticks, rad: last[side].rad };
+  };
+});
+$('startStack').onclick = () => api('/api/stack/start', {}).then((r) => note(r.message, !r.success)).catch((e) => note(e.message, true));
+
+// ---------------- chart ----------------
+const canvas = $('chart');
+function drawChart() {
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  if (canvas.width !== W * dpr || canvas.height !== H * dpr) { canvas.width = W * dpr; canvas.height = H * dpr; }
+  const g = canvas.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  const padL = 34, padR = 8, padT = 8, padB = 20;
+  const now = performance.now() / 1000;
+  let peak = 3;
+  for (const h of history) peak = Math.max(peak, Math.abs(h.left), Math.abs(h.right), Math.abs(h.tl), Math.abs(h.tr));
+  const step = peak > 8 ? 4 : 2;
+  const top = Math.ceil(peak / step) * step;
+  const x = (t) => padL + (W - padL - padR) * (1 - (now - t) / WINDOW);
+  const y = (v) => padT + (H - padT - padB) * (top - v) / (2 * top);
+
+  g.font = `11px ${css('--mono')}`; g.textAlign = 'right'; g.textBaseline = 'middle';
+  for (let v = -top; v <= top; v += step) {
+    g.strokeStyle = v === 0 ? css('--muted') : css('--grid'); g.lineWidth = 1;
+    g.beginPath(); g.moveTo(padL, y(v)); g.lineTo(W - padR, y(v)); g.stroke();
+    g.fillStyle = css('--muted'); g.fillText(String(v), padL - 6, y(v));
+  }
+  g.textAlign = 'center'; g.textBaseline = 'top';
+  for (let s = 0; s <= WINDOW; s += 2) g.fillText(s ? `-${s}s` : 'now', x(now - s), H - padB + 5);
+
+  const line = (key, color, dashed) => {
+    if (history.length < 2) return;
+    g.strokeStyle = color; g.lineWidth = dashed ? 1.6 : 2.2; g.setLineDash(dashed ? [6, 4] : []);
+    g.beginPath();
+    history.forEach((h, i) => { const px = x(h.t), py = y(h[key]); i ? g.lineTo(px, py) : g.moveTo(px, py); });
+    g.stroke(); g.setLineDash([]);
+  };
+  line('tl', css('--left'), true); line('tr', css('--right'), true);
+  line('left', css('--left'), false); line('right', css('--right'), false);
+  requestAnimationFrame(drawChart);
+}
+requestAnimationFrame(drawChart);
+
+// ---------------- hold-to-run ----------------
+let holdTimer = null, holdBtn = null;
+const speed = () => parseFloat($('speed').value);
+$('speed').oninput = () => { $('speedVal').textContent = speed().toFixed(1) + ' rad/s'; };
+
+function startHold(left, right, btn) {
+  stopHold(false);
+  holdBtn = btn; btn.classList.add('held');
+  const send = () => api('/api/wheels', { left: left * speed(), right: right * speed() })
+    .then(() => note('Running. Release to stop.'))
+    .catch((e) => { note(e.message, true); stopHold(); });
+  send(); holdTimer = setInterval(send, 100);
+}
+function stopHold(halt = true) {
+  const was = !!holdTimer;
+  if (holdTimer) clearInterval(holdTimer);
+  if (holdBtn) holdBtn.classList.remove('held');
+  holdTimer = null; holdBtn = null;
+  if (halt && was) { api('/api/wheels', { left: 0, right: 0 }).catch(() => {}); note('Stopped.'); }
+}
+function bindHold(btn, left, right) {
+  btn.addEventListener('pointerdown', (e) => { e.preventDefault(); startHold(left, right, btn); });
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach((ev) => btn.addEventListener(ev, () => stopHold()));
+  btn.addEventListener('keydown', (e) => { if ((e.key === ' ' || e.key === 'Enter') && !holdTimer) { e.preventDefault(); startHold(left, right, btn); } });
+  btn.addEventListener('keyup', (e) => { if (e.key === ' ' || e.key === 'Enter') stopHold(); });
+}
+document.querySelectorAll('[data-hold]').forEach((btn) => {
+  const dir = Number(btn.dataset.hold), side = btn.closest('[data-side]').dataset.side;
+  bindHold(btn, side === 'left' ? dir : 0, side === 'right' ? dir : 0);
+});
+document.querySelectorAll('[data-both]').forEach((btn) => {
+  const [l, r] = btn.dataset.both.split(',').map(Number);
+  bindHold(btn, l, r);
+});
+window.addEventListener('blur', () => stopHold());
+$('estop').onclick = () => { stopHold(false); api('/api/wheels', { left: 0, right: 0 }).catch(() => {}); api('/api/halt', {}).catch(() => {}); note('Stopped.'); };
+
+pollState(); setInterval(pollState, 1000);
+pollWheels(); setInterval(pollWheels, 100);
+</script>
+</body>
+</html>

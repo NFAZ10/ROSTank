@@ -1,0 +1,19 @@
+[Unit]
+Description=Tracked robot ROS 2 bringup (drive, lidar, stereo cameras, Foxglove)
+After=network-online.target nvargus-daemon.service
+Wants=network-online.target
+Requires=nvargus-daemon.service
+
+[Service]
+User=nfazio
+Group=nfazio
+SupplementaryGroups=video dialout
+WorkingDirectory=/home/nfazio
+ExecStart=/home/nfazio/robot_ws/start_robot.sh
+KillSignal=SIGINT
+TimeoutStopSec=15
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

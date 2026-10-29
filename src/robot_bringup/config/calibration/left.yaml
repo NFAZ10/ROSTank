@@ -1,0 +1,9 @@
+# Stereo calibration from the web UI (/calibrate), 2026-10-28 14:23.
+image_width: 1640
+image_height: 1232
+camera_name: left
+camera_matrix: {rows: 3, cols: 3, data: [1098.47933, 0, 786.858448, 0, 1094.89788, 567.173678, 0, 0, 1]}
+distortion_model: plumb_bob
+distortion_coefficients: {rows: 1, cols: 5, data: [-0.0387669963, 0.15526812, -0.00159850026, 0.000817885985, -0.188292828]}
+rectification_matrix: {rows: 3, cols: 3, data: [0.999728259, -0.00202795038, 0.0232227267, 0.00201195095, 0.999997722, 0.000712299871, -0.0232241184, -0.000665383323, 0.999730062]}
+projection_matrix: {rows: 3, cols: 4, data: [1346.23666, 0, 700.243393, 0, 0, 1346.23666, 462.453621, 0, 0, 0, 1, 0]}

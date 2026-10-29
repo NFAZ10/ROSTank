@@ -1,0 +1,36 @@
+# robot_localization EKF: fused /odom + odom->base_link (drive.launch.py).
+#   odom0 = /wheel/odom  tracks (pico_bridge): forward speed is good, turn rate slips
+#   odom1 = /odom_rf2o   lidar scan matching (only runs while mapping/navigating)
+# Bool vectors: [x, y, z, roll, pitch, yaw, vx, vy, vz, vroll, vpitch, vyaw, ax, ay, az]
+ekf_filter_node:
+  ros__parameters:
+    frequency: 20.0   # 30 Hz overran on the loaded Jetson
+    sensor_timeout: 0.2
+    two_d_mode: true
+    publish_tf: true
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: odom
+    # Pico odometry is 50 Hz; a lidar update arrives ~7 Hz with older stamps.
+    smooth_lagged_data: true
+    history_length: 1.0
+
+    odom0: /wheel/odom
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  true,  false,   # vy = 0: tracks can't slide sideways
+                   false, false, true,
+                   false, false, false]
+    odom0_queue_size: 10
+
+    odom1: /odom_rf2o
+    # differential: rf2o's own frame drifts from ours, so only its motion is used.
+    odom1_config: [true,  true,  false,
+                   false, false, true,
+                   false, false, false,
+                   false, false, false,
+                   false, false, false]
+    odom1_differential: true
+    odom1_queue_size: 5
+
+    # process_noise_covariance: robot_localization defaults

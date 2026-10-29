@@ -1,0 +1,481 @@
+<title>Pico Drive Wiring</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: one bench-reference column; two schematic plates, then pin map and checklists. */
+:root {
+  --bg: #f4f6f4;
+  --surface: #ffffff;
+  --ink: #1b2220;
+  --muted: #5a6661;
+  --line: #c8d0cc;
+  --accent: #0a7457;
+  --board: #e9f1ec;
+  --board-2: #f1ecea;
+  --w-pwr: #c62828;
+  --w-gnd: #262b29;
+  --w-pwm: #c96a00;
+  --w-dir: #1c64c8;
+  --w-motor: #7a3cae;
+  --w-3v3: #c92a6b;
+  --w-enca: #2b8a3e;
+  --w-encb: #a67c00;
+  --warn-bg: #fff3e6;
+  --warn-ink: #8a3f00;
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", "Roboto Condensed", sans-serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111614; --surface: #192019; --ink: #e2e8e4; --muted: #98a59f; --line: #2e3833;
+    --accent: #40c496; --board: #1c2a23; --board-2: #2a2120;
+    --w-pwr: #ff6b6b; --w-gnd: #d3dad6; --w-pwm: #ffa94d; --w-dir: #6aa8ff; --w-motor: #c08cff;
+    --w-3v3: #ff7eb0; --w-enca: #6fd380; --w-encb: #ffd43b;
+    --warn-bg: #2d2114; --warn-ink: #ffc078;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111614; --surface: #192019; --ink: #e2e8e4; --muted: #98a59f; --line: #2e3833;
+  --accent: #40c496; --board: #1c2a23; --board-2: #2a2120;
+  --w-pwr: #ff6b6b; --w-gnd: #d3dad6; --w-pwm: #ffa94d; --w-dir: #6aa8ff; --w-motor: #c08cff;
+  --w-3v3: #ff7eb0; --w-enca: #6fd380; --w-encb: #ffd43b;
+  --warn-bg: #2d2114; --warn-ink: #ffc078;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.55;
+}
+.page {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding-block: 40px 64px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid;
+  gap: 40px;
+}
+header { display: grid; gap: 8px; }
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+h1, h2 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  text-wrap: balance;
+  margin: 0;
+}
+h1 { font-size: clamp(30px, 5vw, 44px); line-height: 1.05; }
+h2 { font-size: 24px; line-height: 1.2; }
+.lede { margin: 0; color: var(--muted); max-width: 68ch; }
+code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
+
+.rules {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+.rule {
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-size: 14px;
+  line-height: 1.45;
+}
+.rule strong { display: block; font-family: var(--font-display); font-size: 16px; margin-bottom: 2px; }
+
+section { display: grid; gap: 14px; min-width: 0; }
+.plate {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow-x: auto;
+}
+.plate svg { display: block; width: 100%; min-width: 760px; height: auto; }
+.caption { margin: 0; color: var(--muted); font-size: 14px; max-width: 75ch; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 13px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 7px; }
+.legend i { width: 22px; height: 4px; border-radius: 2px; display: inline-block; }
+
+/* SVG parts */
+.board { fill: var(--board); stroke: var(--line); stroke-width: 1.5; }
+.board-2 { fill: var(--board-2); stroke: var(--line); stroke-width: 1.5; }
+.part { fill: var(--surface); stroke: var(--ink); stroke-width: 1.5; }
+.usb { fill: var(--line); stroke: var(--muted); stroke-width: 1; }
+.pin { fill: var(--surface); stroke: var(--ink); stroke-width: 1.4; }
+.t { fill: var(--ink); font-family: var(--font-body); font-size: 13px; }
+.t-strong { fill: var(--ink); font-family: var(--font-mono); font-size: 13px; font-weight: 500; }
+.t-muted { fill: var(--muted); font-family: var(--font-mono); font-size: 11.5px; }
+.t-title { fill: var(--ink); font-family: var(--font-display); font-size: 16px; font-weight: 600; }
+.t-note { fill: var(--muted); font-family: var(--font-body); font-size: 11.5px; }
+.t-warn { fill: var(--w-3v3); font-family: var(--font-body); font-size: 11.5px; font-weight: 600; }
+.wire { fill: none; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+.w-pwr { stroke: var(--w-pwr); } .w-gnd { stroke: var(--w-gnd); } .w-pwm { stroke: var(--w-pwm); }
+.w-dir { stroke: var(--w-dir); } .w-motor { stroke: var(--w-motor); } .w-3v3 { stroke: var(--w-3v3); }
+.w-enca { stroke: var(--w-enca); } .w-encb { stroke: var(--w-encb); }
+.dot-gnd { fill: var(--w-gnd); } .dot-3v3 { fill: var(--w-3v3); }
+.w-usb { stroke: var(--muted); stroke-dasharray: 7 5; }
+.nc { stroke: var(--muted); stroke-width: 2; stroke-linecap: round; fill: none; }
+
+/* Tables and lists */
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+table { width: 100%; border-collapse: collapse; font-size: 14px; min-width: 620px; }
+th, td { text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th {
+  font-family: var(--font-mono); font-size: 11.5px; font-weight: 500;
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted);
+}
+tbody tr:last-child td { border-bottom: 0; }
+td.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+td .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; vertical-align: 0; }
+tr.group td {
+  background: var(--bg); font-family: var(--font-display); font-weight: 600;
+  font-size: 13px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--accent);
+}
+
+.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 28px; }
+ol, ul { margin: 0; padding-left: 1.3em; display: grid; gap: 8px; }
+li { max-width: 62ch; }
+li::marker { color: var(--accent); font-family: var(--font-mono); }
+.formula {
+  font-family: var(--font-mono); font-size: 14px; background: var(--surface);
+  border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; overflow-x: auto;
+}
+footer { color: var(--muted); font-size: 13px; border-top: 1px solid var(--line); padding-top: 16px; }
+</style>
+
+<div class="page">
+  <header>
+    <div class="eyebrow">Tracked robot · drive electronics</div>
+    <h1>Pico Drive Wiring</h1>
+    <p class="lede">Raspberry Pi Pico to an L298N dual H-bridge and two encoder gear motors. Every pin here matches <code>robot_ws/firmware/pico_drive/pico_drive.ino</code>, so the firmware runs as-is once this is wired.</p>
+  </header>
+
+  <div class="rules">
+    <div class="rule"><strong>Encoders on 3.3 V only</strong>Pico pins are not 5 V tolerant. Power the encoders from Pico pin 36, never from 5 V.</div>
+    <div class="rule"><strong>L298N +5V stays empty</strong>The Pico gets power from the Jetson's USB. Joining the two 5 V supplies can back-feed the Jetson.</div>
+    <div class="rule"><strong>Set the boost to 19 V first</strong>Adjust the boost converter with a multimeter before the Jetson is plugged in. They often ship set to some other voltage.</div>
+    <div class="rule"><strong>Ground everything together</strong>Battery −, L298N GND and Pico GND must connect, or the motor signals have no reference.</div>
+  </div>
+
+  <section>
+    <h2>Motor driver and power</h2>
+    <div class="plate">
+      <svg viewBox="0 0 1000 540" role="img" aria-label="Wiring diagram: Pico GP6 to GP11 to the L298N ENA, IN1 to IN4 and ENB inputs; Pico GND to L298N GND; battery to L298N 12V and GND; L298N outputs to the two track motors.">
+        <!-- Pico -->
+        <text class="t-note" x="135" y="40" text-anchor="middle">USB cable to Jetson (power + data)</text>
+        <rect class="usb" x="113" y="54" width="44" height="18" rx="3"/>
+        <rect class="board" x="40" y="70" width="190" height="300" rx="10"/>
+        <text class="t-title" x="135" y="100" text-anchor="middle">Raspberry Pi Pico</text>
+        <g>
+          <text class="t" x="222" y="134" text-anchor="end"><tspan class="t-strong">GP6</tspan><tspan class="t-muted" dx="6">pin 9</tspan></text>
+          <text class="t" x="222" y="168" text-anchor="end"><tspan class="t-strong">GP7</tspan><tspan class="t-muted" dx="6">pin 10</tspan></text>
+          <text class="t" x="222" y="202" text-anchor="end"><tspan class="t-strong">GP8</tspan><tspan class="t-muted" dx="6">pin 11</tspan></text>
+          <text class="t" x="222" y="236" text-anchor="end"><tspan class="t-strong">GP9</tspan><tspan class="t-muted" dx="6">pin 12</tspan></text>
+          <text class="t" x="222" y="270" text-anchor="end"><tspan class="t-strong">GP10</tspan><tspan class="t-muted" dx="6">pin 14</tspan></text>
+          <text class="t" x="222" y="304" text-anchor="end"><tspan class="t-strong">GP11</tspan><tspan class="t-muted" dx="6">pin 15</tspan></text>
+          <text class="t" x="222" y="344" text-anchor="end"><tspan class="t-strong">GND</tspan><tspan class="t-muted" dx="6">pin 13</tspan></text>
+        </g>
+
+        <!-- L298N -->
+        <rect class="board-2" x="460" y="90" width="220" height="300" rx="8"/>
+        <text class="t-title" x="570" y="113" text-anchor="middle">L298N</text>
+        <text class="t-strong" x="472" y="134">ENA</text><text class="t-note" x="508" y="134">jumper off</text>
+        <text class="t-strong" x="472" y="168">IN1</text>
+        <text class="t-strong" x="472" y="202">IN2</text>
+        <text class="t-strong" x="472" y="236">IN3</text>
+        <text class="t-strong" x="472" y="270">IN4</text>
+        <text class="t-strong" x="472" y="304">ENB</text><text class="t-note" x="508" y="304">jumper off</text>
+        <text class="t-strong" x="666" y="144" text-anchor="end">OUT1</text>
+        <text class="t-strong" x="666" y="179" text-anchor="end">OUT2</text>
+        <text class="t-strong" x="666" y="274" text-anchor="end">OUT3</text>
+        <text class="t-strong" x="666" y="309" text-anchor="end">OUT4</text>
+        <text class="t-note" x="570" y="346" text-anchor="middle">5V-EN jumper on (battery ≤ 12 V)</text>
+        <text class="t-strong" x="510" y="376" text-anchor="middle">+12V</text>
+        <text class="t-strong" x="570" y="376" text-anchor="middle">GND</text>
+        <text class="t-strong" x="630" y="376" text-anchor="middle">+5V</text>
+
+        <!-- Signal wires Pico -> L298N -->
+        <path class="wire w-pwm" d="M252 130 H452"/>
+        <path class="wire w-dir" d="M252 164 H452"/>
+        <path class="wire w-dir" d="M252 198 H452"/>
+        <path class="wire w-dir" d="M252 232 H452"/>
+        <path class="wire w-dir" d="M252 266 H452"/>
+        <path class="wire w-pwm" d="M252 300 H452"/>
+        <!-- Pico GND to L298N GND, hopping over the +12V wire -->
+        <path class="wire w-gnd" d="M252 340 H410 V430 H502 A8 8 0 0 1 518 430 H570"/>
+
+        <!-- Battery -->
+        <rect class="part" x="440" y="460" width="250" height="56" rx="8"/>
+        <text class="t-strong" x="510" y="480" text-anchor="middle">+</text>
+        <text class="t-strong" x="570" y="480" text-anchor="middle">−</text>
+        <text class="t" x="565" y="504" text-anchor="middle">Battery 3S, 11.1 V (9–12.6 V)</text>
+        <path class="wire w-pwr" d="M510 460 V394"/>
+        <path class="wire w-gnd" d="M570 460 V394"/>
+        <circle class="dot-gnd" cx="570" cy="430" r="5"/>
+        <text class="t-note" x="500" y="452" text-anchor="end">fuse + switch</text>
+        <!-- +5V not connected -->
+        <path class="nc" d="M630 394 V412 M624 406 L636 418 M636 406 L624 418"/>
+        <text class="t-note" x="644" y="416">not connected</text>
+
+        <!-- Motors -->
+        <rect class="part" x="790" y="115" width="170" height="85" rx="14"/>
+        <text class="t-strong" x="806" y="144">M+</text>
+        <text class="t-strong" x="806" y="179">M−</text>
+        <text class="t-title" x="895" y="152" text-anchor="middle">Left track</text>
+        <text class="t-note" x="895" y="170" text-anchor="middle">motor A</text>
+        <rect class="part" x="790" y="245" width="170" height="85" rx="14"/>
+        <text class="t-strong" x="806" y="274">M+</text>
+        <text class="t-strong" x="806" y="309">M−</text>
+        <text class="t-title" x="895" y="282" text-anchor="middle">Right track</text>
+        <text class="t-note" x="895" y="300" text-anchor="middle">motor B</text>
+        <path class="wire w-motor" d="M684 140 H786"/>
+        <path class="wire w-motor" d="M684 175 H786"/>
+        <path class="wire w-motor" d="M684 270 H786"/>
+        <path class="wire w-motor" d="M684 305 H786"/>
+        <text class="t-note" x="790" y="362">Track spins the wrong way?</text>
+        <text class="t-note" x="790" y="378">Swap that motor's two wires.</text>
+
+        <!-- Pins drawn last so they sit on top of wire ends -->
+        <g>
+          <rect class="pin" x="244" y="126" width="8" height="8"/><rect class="pin" x="244" y="160" width="8" height="8"/>
+          <rect class="pin" x="244" y="194" width="8" height="8"/><rect class="pin" x="244" y="228" width="8" height="8"/>
+          <rect class="pin" x="244" y="262" width="8" height="8"/><rect class="pin" x="244" y="296" width="8" height="8"/>
+          <rect class="pin" x="244" y="336" width="8" height="8"/>
+          <rect class="pin" x="452" y="126" width="8" height="8"/><rect class="pin" x="452" y="160" width="8" height="8"/>
+          <rect class="pin" x="452" y="194" width="8" height="8"/><rect class="pin" x="452" y="228" width="8" height="8"/>
+          <rect class="pin" x="452" y="262" width="8" height="8"/><rect class="pin" x="452" y="296" width="8" height="8"/>
+          <rect class="pin" x="680" y="136" width="8" height="8"/><rect class="pin" x="680" y="171" width="8" height="8"/>
+          <rect class="pin" x="680" y="266" width="8" height="8"/><rect class="pin" x="680" y="301" width="8" height="8"/>
+          <rect class="pin" x="506" y="386" width="8" height="8"/><rect class="pin" x="566" y="386" width="8" height="8"/>
+          <rect class="pin" x="626" y="386" width="8" height="8"/>
+          <rect class="pin" x="782" y="136" width="8" height="8"/><rect class="pin" x="782" y="171" width="8" height="8"/>
+          <rect class="pin" x="782" y="266" width="8" height="8"/><rect class="pin" x="782" y="301" width="8" height="8"/>
+        </g>
+      </svg>
+    </div>
+    <div class="legend">
+      <span><i style="background:var(--w-pwm)"></i>Speed (PWM)</span>
+      <span><i style="background:var(--w-dir)"></i>Direction</span>
+      <span><i style="background:var(--w-motor)"></i>Motor power</span>
+      <span><i style="background:var(--w-pwr)"></i>Battery +</span>
+      <span><i style="background:var(--w-gnd)"></i>Ground</span>
+    </div>
+    <p class="caption">Pull the ENA and ENB jumpers off the L298N so the Pico can set speed. Leave the 5V-EN regulator jumper on while the battery is 12 V or less. Above 12 V, take it off and the L298N's logic needs a separate 5 V. The Jetson runs from the same battery on its own fused branch through a boost converter, never from the L298N's terminals (see System power).</p>
+  </section>
+
+  <section>
+    <h2>System power</h2>
+    <div class="plate">
+      <svg viewBox="0 0 1000 400" role="img" aria-label="Power wiring: 3S battery positive through a 10 A main fuse and switch, then splitting to the L298N 12V terminal and, through a 5 A fuse, to a boost converter set to 19 V that feeds the Jetson barrel jack. Battery negative goes to the L298N GND and the boost converter input negative. The Jetson powers the Pico over USB.">
+        <!-- Battery -->
+        <rect class="part" x="30" y="165" width="140" height="120" rx="8"/>
+        <text class="t-title" x="92" y="215" text-anchor="middle">Battery</text>
+        <text class="t-note" x="92" y="234" text-anchor="middle">3S Li-ion / LiPo</text>
+        <text class="t-note" x="92" y="250" text-anchor="middle">11.1 V nominal</text>
+        <text class="t-strong" x="160" y="199" text-anchor="end">+</text>
+        <text class="t-strong" x="160" y="259" text-anchor="end">−</text>
+
+        <!-- Main fuse + switch -->
+        <path class="wire w-pwr" d="M178 195 H200 M250 195 H270 M320 195 H360"/>
+        <rect class="part" x="200" y="185" width="50" height="20" rx="4"/>
+        <text class="t-strong" x="225" y="176" text-anchor="middle">10 A</text>
+        <text class="t-note" x="225" y="225" text-anchor="middle">main fuse</text>
+        <circle class="pin" cx="273" cy="195" r="4"/><circle class="pin" cx="317" cy="195" r="4"/>
+        <path class="nc" d="M276 193 L314 176" style="stroke: var(--ink)"/>
+        <text class="t-note" x="295" y="225" text-anchor="middle">switch</text>
+        <circle class="dot-gnd" cx="360" cy="195" r="5" style="fill: var(--w-pwr)"/>
+
+        <!-- Branch to L298N -->
+        <path class="wire w-pwr" d="M360 195 V70 H752"/>
+        <!-- Branch to boost via its own fuse -->
+        <path class="wire w-pwr" d="M360 195 V250 H392 A8 8 0 0 1 408 250 H470 M520 250 H552"/>
+        <rect class="part" x="470" y="240" width="50" height="20" rx="4"/>
+        <text class="t-strong" x="495" y="231" text-anchor="middle">5 A</text>
+
+        <!-- Ground: battery − to L298N GND and boost IN− -->
+        <path class="wire w-gnd" d="M178 255 H190 V350 H530 V290 H552"/>
+        <path class="wire w-gnd" d="M400 350 V100 H752"/>
+        <circle class="dot-gnd" cx="400" cy="350" r="5"/>
+
+        <!-- L298N -->
+        <rect class="board-2" x="760" y="40" width="210" height="90" rx="8"/>
+        <text class="t-strong" x="772" y="75">+12V</text>
+        <text class="t-strong" x="772" y="105">GND</text>
+        <text class="t-title" x="900" y="82" text-anchor="middle">L298N</text>
+        <text class="t-note" x="900" y="100" text-anchor="middle">motors</text>
+
+        <!-- Boost converter -->
+        <rect class="part" x="560" y="215" width="160" height="100" rx="8"/>
+        <text class="t-muted" x="568" y="255">IN+</text>
+        <text class="t-muted" x="568" y="295">IN−</text>
+        <text class="t-muted" x="712" y="255" text-anchor="end">OUT+</text>
+        <text class="t-muted" x="712" y="295" text-anchor="end">OUT−</text>
+        <text class="t-title" x="640" y="238" text-anchor="middle">Boost</text>
+        <text class="t-note" x="640" y="272" text-anchor="middle">12 → 19 V</text>
+        <text class="t-note" x="640" y="306" text-anchor="middle">≥ 100 W</text>
+
+        <!-- 19 V out to barrel plug -->
+        <path class="wire w-pwr" d="M728 250 H770 V262 H790"/>
+        <path class="wire w-gnd" d="M728 290 H770 V278 H790"/>
+        <text class="t-strong" x="760" y="240" text-anchor="middle">19 V</text>
+        <rect class="usb" x="790" y="256" width="30" height="28" rx="4"/>
+        <path class="wire w-gnd" d="M820 270 H830" style="stroke: var(--muted)"/>
+        <text class="t-note" x="805" y="304" text-anchor="middle">5.5 × 2.5 mm</text>
+        <text class="t-note" x="805" y="318" text-anchor="middle">centre +</text>
+
+        <!-- Jetson -->
+        <rect class="board" x="830" y="200" width="140" height="130" rx="8"/>
+        <text class="t-title" x="900" y="250" text-anchor="middle">Jetson</text>
+        <text class="t-note" x="900" y="268" text-anchor="middle">Orin Nano Super</text>
+        <text class="t-note" x="900" y="284" text-anchor="middle">DC jack</text>
+        <path class="wire w-usb" d="M900 330 V372"/>
+        <text class="t-note" x="910" y="368">USB → Pico (5 V + data)</text>
+
+        <!-- Terminals on top of wire ends -->
+        <g>
+          <rect class="pin" x="170" y="191" width="8" height="8"/><rect class="pin" x="170" y="251" width="8" height="8"/>
+          <rect class="pin" x="752" y="66" width="8" height="8"/><rect class="pin" x="752" y="96" width="8" height="8"/>
+          <rect class="pin" x="552" y="246" width="8" height="8"/><rect class="pin" x="552" y="286" width="8" height="8"/>
+          <rect class="pin" x="720" y="246" width="8" height="8"/><rect class="pin" x="720" y="286" width="8" height="8"/>
+        </g>
+      </svg>
+    </div>
+    <div class="legend">
+      <span><i style="background:var(--w-pwr)"></i>Battery + / 19 V</span>
+      <span><i style="background:var(--w-gnd)"></i>Ground</span>
+      <span><i style="background:var(--muted)"></i>USB</span>
+    </div>
+    <p class="caption">The boost converter holds the Jetson at a steady 19 V while the pack drains from 12.6 V towards 9 V and while motor starts and stalls drag it down, so the Jetson doesn't brown out and reboot mid-drive. Feed it straight from the battery on its own 5 A fuse rather than from the L298N's terminals. The Jetson draws up to about 25 W, plus USB devices, which near an empty pack is about 3.5 A on the 12 V side. Use wire rated for at least 5 A on both branches.</p>
+  </section>
+
+  <section>
+    <h2>Encoders</h2>
+    <div class="plate">
+      <svg viewBox="0 0 1000 400" role="img" aria-label="Encoder wiring: Pico GP14 and GP15 to the left encoder A and B, GP16 and GP17 to the right encoder A and B, Pico 3V3 pin 36 to both encoder VCC pins, Pico GND pins 18 and 23 to the encoder grounds.">
+        <rect class="board" x="40" y="50" width="190" height="330" rx="10"/>
+        <text class="t-title" x="135" y="74" text-anchor="middle">Raspberry Pi Pico</text>
+        <text class="t" x="222" y="94" text-anchor="end"><tspan class="t-strong">GP14</tspan><tspan class="t-muted" dx="6">pin 19</tspan></text>
+        <text class="t" x="222" y="129" text-anchor="end"><tspan class="t-strong">GP15</tspan><tspan class="t-muted" dx="6">pin 20</tspan></text>
+        <text class="t" x="222" y="164" text-anchor="end"><tspan class="t-strong">GND</tspan><tspan class="t-muted" dx="6">pin 18</tspan></text>
+        <text class="t" x="222" y="219" text-anchor="end"><tspan class="t-strong">3V3 OUT</tspan><tspan class="t-muted" dx="6">pin 36</tspan></text>
+        <text class="t" x="222" y="274" text-anchor="end"><tspan class="t-strong">GND</tspan><tspan class="t-muted" dx="6">pin 23</tspan></text>
+        <text class="t" x="222" y="309" text-anchor="end"><tspan class="t-strong">GP16</tspan><tspan class="t-muted" dx="6">pin 21</tspan></text>
+        <text class="t" x="222" y="344" text-anchor="end"><tspan class="t-strong">GP17</tspan><tspan class="t-muted" dx="6">pin 22</tspan></text>
+
+        <rect class="part" x="640" y="60" width="230" height="150" rx="10"/>
+        <text class="t-strong" x="656" y="94">A <tspan class="t-muted">(C1)</tspan></text>
+        <text class="t-strong" x="656" y="129">B <tspan class="t-muted">(C2)</tspan></text>
+        <text class="t-strong" x="656" y="164">GND</text>
+        <text class="t-strong" x="656" y="194">VCC</text>
+        <text class="t-title" x="790" y="128" text-anchor="middle">Left track</text>
+        <text class="t-note" x="790" y="146" text-anchor="middle">encoder</text>
+
+        <rect class="part" x="640" y="225" width="230" height="145" rx="10"/>
+        <text class="t-strong" x="656" y="244">VCC</text>
+        <text class="t-strong" x="656" y="274">GND</text>
+        <text class="t-strong" x="656" y="309">A <tspan class="t-muted">(C1)</tspan></text>
+        <text class="t-strong" x="656" y="344">B <tspan class="t-muted">(C2)</tspan></text>
+        <text class="t-title" x="790" y="293" text-anchor="middle">Right track</text>
+        <text class="t-note" x="790" y="311" text-anchor="middle">encoder</text>
+
+        <path class="wire w-enca" d="M252 90 H636"/>
+        <path class="wire w-encb" d="M252 125 H636"/>
+        <path class="wire w-gnd" d="M252 160 H636"/>
+        <path class="wire w-3v3" d="M252 215 H560 M560 215 V190 H636 M560 215 V240 H636"/>
+        <circle class="dot-3v3" cx="560" cy="215" r="5"/>
+        <text class="t-warn" x="420" y="207" text-anchor="middle">3.3 V only, never 5 V</text>
+        <path class="wire w-gnd" d="M252 270 H636"/>
+        <path class="wire w-enca" d="M252 305 H636"/>
+        <path class="wire w-encb" d="M252 340 H636"/>
+
+        <g>
+          <rect class="pin" x="244" y="86" width="8" height="8"/><rect class="pin" x="244" y="121" width="8" height="8"/>
+          <rect class="pin" x="244" y="156" width="8" height="8"/><rect class="pin" x="244" y="211" width="8" height="8"/>
+          <rect class="pin" x="244" y="266" width="8" height="8"/><rect class="pin" x="244" y="301" width="8" height="8"/>
+          <rect class="pin" x="244" y="336" width="8" height="8"/>
+          <rect class="pin" x="636" y="86" width="8" height="8"/><rect class="pin" x="636" y="121" width="8" height="8"/>
+          <rect class="pin" x="636" y="156" width="8" height="8"/><rect class="pin" x="636" y="186" width="8" height="8"/>
+          <rect class="pin" x="636" y="236" width="8" height="8"/><rect class="pin" x="636" y="266" width="8" height="8"/>
+          <rect class="pin" x="636" y="301" width="8" height="8"/><rect class="pin" x="636" y="336" width="8" height="8"/>
+        </g>
+      </svg>
+    </div>
+    <div class="legend">
+      <span><i style="background:var(--w-enca)"></i>Encoder A</span>
+      <span><i style="background:var(--w-encb)"></i>Encoder B</span>
+      <span><i style="background:var(--w-3v3)"></i>3.3 V</span>
+      <span><i style="background:var(--w-gnd)"></i>Ground</span>
+    </div>
+    <p class="caption">Encoder gear motors (JGB37-520 style) have a 6-wire lead. M+ and M− go to the L298N outputs above. The other four go here. Wire colors vary by seller, so go by the labels printed on the encoder board, not the colors. Run encoder wires away from the motor wires, or twist each motor pair, to keep switching noise out of the counts.</p>
+  </section>
+
+  <section>
+    <h2>Pin map</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Pico pin</th><th>Signal</th><th>Goes to</th><th>Firmware name</th></tr></thead>
+        <tbody>
+          <tr class="group"><td colspan="4">Motor driver</td></tr>
+          <tr><td class="num">9</td><td class="num">GP6</td><td><span class="sw" style="background:var(--w-pwm)"></span>L298N ENA (left speed)</td><td class="num">L_EN</td></tr>
+          <tr><td class="num">10</td><td class="num">GP7</td><td><span class="sw" style="background:var(--w-dir)"></span>L298N IN1</td><td class="num">L_IN1</td></tr>
+          <tr><td class="num">11</td><td class="num">GP8</td><td><span class="sw" style="background:var(--w-dir)"></span>L298N IN2</td><td class="num">L_IN2</td></tr>
+          <tr><td class="num">12</td><td class="num">GP9</td><td><span class="sw" style="background:var(--w-dir)"></span>L298N IN3</td><td class="num">R_IN1</td></tr>
+          <tr><td class="num">14</td><td class="num">GP10</td><td><span class="sw" style="background:var(--w-dir)"></span>L298N IN4</td><td class="num">R_IN2</td></tr>
+          <tr><td class="num">15</td><td class="num">GP11</td><td><span class="sw" style="background:var(--w-pwm)"></span>L298N ENB (right speed)</td><td class="num">R_EN</td></tr>
+          <tr><td class="num">13</td><td class="num">GND</td><td><span class="sw" style="background:var(--w-gnd)"></span>L298N GND terminal</td><td class="num">—</td></tr>
+          <tr class="group"><td colspan="4">Encoders</td></tr>
+          <tr><td class="num">19</td><td class="num">GP14</td><td><span class="sw" style="background:var(--w-enca)"></span>Left encoder A</td><td class="num">L_A</td></tr>
+          <tr><td class="num">20</td><td class="num">GP15</td><td><span class="sw" style="background:var(--w-encb)"></span>Left encoder B</td><td class="num">L_B</td></tr>
+          <tr><td class="num">21</td><td class="num">GP16</td><td><span class="sw" style="background:var(--w-enca)"></span>Right encoder A</td><td class="num">R_A</td></tr>
+          <tr><td class="num">22</td><td class="num">GP17</td><td><span class="sw" style="background:var(--w-encb)"></span>Right encoder B</td><td class="num">R_B</td></tr>
+          <tr><td class="num">18</td><td class="num">GND</td><td><span class="sw" style="background:var(--w-gnd)"></span>Left encoder GND</td><td class="num">—</td></tr>
+          <tr><td class="num">23</td><td class="num">GND</td><td><span class="sw" style="background:var(--w-gnd)"></span>Right encoder GND</td><td class="num">—</td></tr>
+          <tr><td class="num">36</td><td class="num">3V3 OUT</td><td><span class="sw" style="background:var(--w-3v3)"></span>Both encoder VCC</td><td class="num">—</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="caption">Physical pin numbers count with the USB port at the top: pins 1 to 20 run down the left edge, and 21 to 40 run back up the right edge. Pins 18 to 23 sit together at the bottom corner, which keeps the encoder wiring short.</p>
+  </section>
+
+  <div class="two">
+    <section>
+      <h2>Before first power-on</h2>
+      <ol>
+        <li>Check there is continuity between battery −, the L298N GND terminal, the boost converter IN− and Pico pin 13, and none between battery + and ground.</li>
+        <li>With the Jetson unplugged, switch on and set the boost converter output to 19.0 V on a multimeter. Switch off, then plug in the Jetson.</li>
+        <li>Lift the robot so both tracks are off the ground.</li>
+        <li>Plug the Pico into the Jetson, then switch on. The main switch powers the Jetson and the motors together. The motors stay still until the Jetson sends drive commands.</li>
+        <li>Ask Claude to run the direction test. Each track runs slowly forward, then backward, and any reversed side gets flipped in the firmware.</li>
+      </ol>
+    </section>
+    <section>
+      <h2>Turning the encoders on</h2>
+      <ul>
+        <li>The encoders do nothing until <code>HAS_ENCODERS</code> is set to <code>1</code> in the firmware. Until then the drive runs open-loop.</li>
+        <li>The firmware counts both edges of channel A, so counts per sprocket revolution are:</li>
+      </ul>
+      <div class="formula">TICKS_PER_REV = encoder PPR × 2 × gear ratio<br>e.g. 11 PPR × 2 × 30 = 660</div>
+      <ul>
+        <li>Take the PPR and gear ratio from the motor's listing. If the track sprocket is geared off the motor shaft, multiply by that ratio too.</li>
+        <li>If a track's counts go down while it drives forward, swap that encoder's A and B wires.</li>
+      </ul>
+    </section>
+  </div>
+
+  <footer>Firmware: <span class="mono">~/robot_ws/firmware/pico_drive/pico_drive.ino</span> · Flash with <span class="mono">~/robot_ws/firmware/flash.sh</span> · PWM 2 kHz, minimum duty 18% to cover the L298N's ~2 V drop.</footer>
+</div>

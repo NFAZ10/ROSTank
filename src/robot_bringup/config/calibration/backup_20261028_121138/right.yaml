@@ -1,0 +1,10 @@
+# PLACEHOLDER from IMX219 datasheet (f=3.04mm, 1.12um px) at 1640x1232 (mode 3).
+# Replace with the output of ros2 run camera_calibration cameracalibrator (stereo).
+image_width: 1640
+image_height: 1232
+camera_name: stereo_right
+camera_matrix: {rows: 3, cols: 3, data: [1357.0, 0.0, 820.0, 0.0, 1357.0, 616.0, 0.0, 0.0, 1.0]}
+distortion_model: plumb_bob
+distortion_coefficients: {rows: 1, cols: 5, data: [0.0, 0.0, 0.0, 0.0, 0.0]}
+rectification_matrix: {rows: 3, cols: 3, data: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]}
+projection_matrix: {rows: 3, cols: 4, data: [1357.0, 0.0, 820.0, -81.4, 0.0, 1357.0, 616.0, 0.0, 0.0, 0.0, 1.0, 0.0]}

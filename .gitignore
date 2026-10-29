@@ -1,0 +1,9 @@
+# colcon output
+build/
+install/
+log/
+# Arduino build output (firmware/flash.sh recreates it)
+firmware/pico_drive/build/
+__pycache__/
+*.pyc
+isaac_ros_assets/

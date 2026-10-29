@@ -1,0 +1,92 @@
+<?xml version="1.0"?>
+<!--
+  Gazebo Fortress additions, included only with sim:=true.
+
+  Tracks are not simulated physically: VelocityControl moves the body straight from
+  /cmd_vel and OdometryPublisher reports the motion as /odom + odom->base_link (the same
+  interface pico_bridge gives on the real robot). Gazebo wheel-contact physics proved a
+  poor stand-in for tracks (turns ~27% short, body sliding), which broke SLAM for reasons
+  that say nothing about the real robot. Real turning slip gets calibrated on the robot
+  (track_width in drive.yaml) and is best fixed with a gyro/IMU.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <!-- Low-friction track blocks carry the body over the floor and bump into obstacles. -->
+  <xacro:macro name="track_contact" params="side">
+    <gazebo reference="track_${side}">
+      <mu1>0.01</mu1>
+      <mu2>0.01</mu2>
+    </gazebo>
+  </xacro:macro>
+  <xacro:track_contact side="left"/>
+  <xacro:track_contact side="right"/>
+
+  <gazebo>
+    <plugin filename="ignition-gazebo-velocity-control-system" name="ignition::gazebo::systems::VelocityControl">
+      <topic>cmd_vel</topic>
+    </plugin>
+    <plugin filename="ignition-gazebo-odometry-publisher-system" name="ignition::gazebo::systems::OdometryPublisher">
+      <odom_frame>odom</odom_frame>
+      <robot_base_frame>base_link</robot_base_frame>
+      <odom_topic>odom</odom_topic>
+      <tf_topic>tf</tf_topic>
+      <dimensions>2</dimensions>
+      <odom_publish_frequency>50</odom_publish_frequency>
+    </plugin>
+  </gazebo>
+
+  <!-- RPLIDAR A1: 360 degrees, ~7 Hz, 0.15-12 m -->
+  <gazebo reference="laser">
+    <sensor name="rplidar" type="gpu_lidar">
+      <topic>scan</topic>
+      <ignition_frame_id>laser</ignition_frame_id>
+      <update_rate>7</update_rate>
+      <always_on>true</always_on>
+      <visualize>false</visualize>
+      <lidar>
+        <scan>
+          <horizontal>
+            <samples>720</samples>
+            <min_angle>${-pi}</min_angle>
+            <max_angle>${pi}</max_angle>
+          </horizontal>
+        </scan>
+        <range>
+          <min>0.15</min>
+          <max>12.0</max>
+          <resolution>0.01</resolution>
+        </range>
+        <noise>
+          <type>gaussian</type>
+          <mean>0</mean>
+          <stddev>0.01</stddev>
+        </noise>
+      </lidar>
+    </sensor>
+  </gazebo>
+
+  <!-- IMX219 eyes. 640x480 to keep the Jetson's GPU free; the real ones run 1640x1232. -->
+  <xacro:macro name="sim_camera" params="side">
+    <gazebo reference="stereo_camera_${side}">
+      <sensor name="camera_${side}" type="camera">
+        <topic>${side}/image_raw</topic>
+        <ignition_frame_id>stereo_camera_${side}_optical</ignition_frame_id>
+        <update_rate>15</update_rate>
+        <always_on>true</always_on>
+        <camera>
+          <horizontal_fov>1.085</horizontal_fov>   <!-- 62.2 degrees, stock IMX219 lens -->
+          <image>
+            <width>640</width>
+            <height>480</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.05</near>
+            <far>30</far>
+          </clip>
+        </camera>
+      </sensor>
+    </gazebo>
+  </xacro:macro>
+  <xacro:sim_camera side="left"/>
+  <xacro:sim_camera side="right"/>
+</robot>
