@@ -9,6 +9,6 @@ sudo cp udev/*.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo
 sudo install -m 440 sudoers/90-nfazio-nopasswd /etc/sudoers.d/   # passwordless sudo (web UI stack control)
 ```
 
-- **`99-pico.rules`** gives the Pico drive board the name `/dev/pico`, and **`99-rplidar.rules`** gives the RPLIDAR A1 (CP2102 adapter) `/dev/rplidar`.
+- **`99-pico.rules`** gives the Pico drive board the name `/dev/pico` (by its USB serial) and any other Pico (sensor/LED board) `/dev/pico_io`, and **`99-rplidar.rules`** gives the RPLIDAR A1 (CP2102 adapter) `/dev/rplidar`.
 - **`99-usb-no-autosuspend.rules`** keeps USB devices from being power-saved.
 - `src/rf2o_laser_odometry` is MAPIRlab's rf2o (GPL-3) with local fixes; see `docs/patches/`.

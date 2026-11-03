@@ -3,8 +3,8 @@
 pico_bridge:
   ros__parameters:
     port: /dev/pico
-    wheel_radius: 0.03       # drive sprocket pitch radius [m]
-    track_width: 0.1850       # center-to-center of tracks [m]
+    wheel_radius: 0.0252       # drive sprocket pitch radius [m]
+    track_width: 0.2150       # center-to-center of tracks [m]
     max_wheel_speed: 13.0    # [rad/s], keep equal to MAX_RAD_S in the firmware
     cmd_timeout: 0.5
     publish_tf: false        # the EKF (config/ekf.yaml) owns odom->base_link

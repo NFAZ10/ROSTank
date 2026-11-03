@@ -1,2 +1,6 @@
-SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="000a|0005|0009", MODE="0666", GROUP="dialout", SYMLINK+="pico"
+# Two Picos. The drive board is told apart by its USB serial (flash chip ID) -> /dev/pico;
+# any other Pico (the sensor/LED board, firmware/pico_io) -> /dev/pico_io.
+# Replacing the drive Pico: put the new board's serial here (udevadm info -n /dev/ttyACM0 | grep SERIAL_SHORT).
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="000a|0005|0009", ENV{ID_SERIAL_SHORT}=="53032847306C5C1C", MODE="0666", GROUP="dialout", SYMLINK+="pico"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="000a|0005|0009", ENV{ID_SERIAL_SHORT}!="53032847306C5C1C", MODE="0666", GROUP="dialout", SYMLINK+="pico_io"
 SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="0003|000a|000f", MODE="0666"
