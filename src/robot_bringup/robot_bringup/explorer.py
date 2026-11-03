@@ -30,9 +30,11 @@ class Explorer(Node):
     def __init__(self):
         super().__init__('explorer')
         p = lambda name, default: self.declare_parameter(name, default).value
-        self.min_frontier = p('min_frontier_size', 0.4)   # m of frontier edge worth visiting
-        self.clearance = p('robot_clearance', 0.25)      # goal must be this far from any wall, m
-        self.size_weight = p('size_weight', 1.0)         # metres of detour one metre of frontier is worth
+        self.min_frontier = p('min_frontier_size', 0.5)   # m of frontier edge worth visiting
+        # Goal this far from any wall: beyond Nav2's inflation (0.25 m), or the planner refuses it.
+        self.clearance = p('robot_clearance', 0.4)
+        self.size_weight = p('size_weight', 0.5)         # metres of detour one metre of frontier is worth
+        self.commit_time = p('commit_time', 15.0)        # s before switching away from a target
         self.blacklist_radius = p('blacklist_radius', 0.6)
         self.progress_timeout = p('progress_timeout', 30.0)  # s without moving 0.2 m -> give up on goal
         self.return_home = p('return_home', True)
@@ -99,7 +101,8 @@ class Explorer(Node):
         return out
 
     def still_frontier(self, goal):
-        return any(math.hypot(goal[0] - x, goal[1] - y) < 0.5 for x, y, _ in self.frontiers())
+        # Generous: on a real map the frontier edge shifts a little with every scan.
+        return any(math.hypot(goal[0] - x, goal[1] - y) < 0.8 for x, y, _ in self.frontiers())
 
     # ---------- goals ----------
     def send(self, x, y, label):
@@ -111,6 +114,7 @@ class Explorer(Node):
         g.pose.pose.position.x, g.pose.pose.position.y = x, y
         g.pose.pose.orientation.z, g.pose.pose.orientation.w = math.sin(yaw / 2), math.cos(yaw / 2)
         self.goal, self.goal_result, self.goal_handle = (x, y), None, None
+        self.goal_time = time.monotonic()
         self.progress = (time.monotonic(), *(here or (x, y)))
         self.nav.send_goal_async(g).add_done_callback(self.on_accepted)
         self.say(label)
@@ -157,7 +161,8 @@ class Explorer(Node):
                     self.get_logger().warn(f'no progress towards {self.goal}: skipping that spot')
                     self.blacklist.append(self.goal)
                     self.cancel()
-                elif self.state == 'exploring' and int(time.monotonic()) % 5 == 0 and not self.still_frontier(self.goal):
+                elif (self.state == 'exploring' and time.monotonic() - self.goal_time > self.commit_time
+                      and int(time.monotonic()) % 5 == 0 and not self.still_frontier(self.goal)):
                     self.cancel()  # mapped on the way there: pick the next one
                 return
         if self.state == 'returning':
@@ -196,8 +201,11 @@ def main():
     except SystemExit as e:
         code = e.code or 0
     except KeyboardInterrupt:
-        node.cancel()
-        node.say('stopped')
+        try:
+            node.cancel()
+            node.say('stopped')
+        except Exception:  # noqa: BLE001 - ROS may already be shutting down (Ctrl-C reaches both)
+            pass
     finally:
         node.destroy_node()
         rclpy.try_shutdown()

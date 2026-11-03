@@ -8,15 +8,23 @@ Runs only while something subscribes to one of its outputs (web UI depth view, F
        /depth/camera_info    for the rectified left camera
        /depth/points         sensor_msgs/PointCloud2 xyz+rgb (every 4th pixel)
        /depth/preview/compressed  colour-coded depth JPEG (near = red, far = blue)
+       /depth/obstacles      sensor_msgs/PointCloud2 in base_link: what's safe to steer by,
+                             confirmed over several frames (depth_obstacles.py)
        TF stereo_camera_left_optical -> stereo_camera_left_rect (static)
 
 Rectification comes from config/calibration/{left,right}.yaml, scaled to the preview size:
 the Argus camera node publishes camera_info with K replaced by the rectified P, so its
 camera_info can't be used to rectify. The cameras aren't synchronised; frames are paired
-within max_pair_gap and the right one is treated as simultaneous.
+within max_pair_gap and the right one is treated as simultaneous, so a pair is skipped when
+the robot turned far enough between the two exposures to throw the disparity off.
+
+Setting mount-dependent values after moving the cameras: right_row_offset and disparity_offset
+here, camera_pitch in the URDF. A fresh stereo calibration should bring the first two to ~0.
 """
+import array
 import os
 import time
+from collections import deque
 
 import cv2
 import numpy as np
@@ -25,11 +33,14 @@ import vpi
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import TransformStamped
+from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, CompressedImage, Image, PointCloud2, PointField
-from tf2_ros import StaticTransformBroadcaster
+from tf2_ros import Buffer, StaticTransformBroadcaster, TransformListener
+
+from robot_bringup.depth_obstacles import ObstacleGrid, depth_to_base, from_odom, select_band, to_odom
 
 SIDES = ('left', 'right')
 
@@ -46,6 +57,23 @@ def load_calib(path):
     }
 
 
+def as_bytes(data):
+    # Assigning plain bytes to a uint8[] field checks every element in Python (~250 ms per frame).
+    return array.array('B', data)
+
+
+def matrix_of(t):
+    """4x4 transform from a geometry_msgs Transform."""
+    q, p = t.rotation, t.translation
+    x, y, z, w = q.x, q.y, q.z, q.w
+    M = np.eye(4)
+    M[:3, :3] = [[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                 [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                 [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]]
+    M[:3, 3] = [p.x, p.y, p.z]
+    return M
+
+
 def quat_from_matrix(R):
     w = np.sqrt(max(0.0, 1.0 + R[0, 0] + R[1, 1] + R[2, 2])) / 2.0
     x = np.copysign(np.sqrt(max(0.0, 1.0 + R[0, 0] - R[1, 1] - R[2, 2])) / 2.0, R[2, 1] - R[1, 2])
@@ -58,10 +86,30 @@ class StereoDepth(Node):
     def __init__(self):
         super().__init__('stereo_depth')
         self.force_on = self.declare_parameter('force_on', False).value
-        self.max_disparity = self.declare_parameter('max_disparity', 64).value   # px at 640 wide: ~0.5 m nearest
+        self.max_disparity = self.declare_parameter('max_disparity', 128).value  # px at 640 wide: ~0.25 m nearest
         self.max_range = self.declare_parameter('max_range', 6.0).value          # m, beyond this = unknown
         self.max_pair_gap = self.declare_parameter('max_pair_gap', 0.035).value  # s; one frame at 30 fps
         self.speckle_size = self.declare_parameter('speckle_size', 150).value    # px, smaller islands dropped
+        # Matcher: higher p1/p2 steady the result; uniqueness rejects ambiguous matches, which is
+        # most of the plain floor (measured 2026-11-02: floor mismatches 44% -> 1% of pixels).
+        self.p1 = self.declare_parameter('p1', 7).value
+        self.p2 = self.declare_parameter('p2', 96).value
+        self.uniqueness = self.declare_parameter('uniqueness', 0.85).value
+        # Corrections for lenses that moved since calibration (see top of file), right image rows / px.
+        self.right_row_offset = self.declare_parameter('right_row_offset', 3.0).value
+        self.disparity_offset = self.declare_parameter('disparity_offset', 0.0).value
+        self.max_rate = self.declare_parameter('max_rate', 8.0).value            # Hz, leaves CPU for Nav2
+        self.max_yaw_error = self.declare_parameter('max_yaw_error', 2.0).value  # px of turn between exposures
+        # Obstacles: height band above the floor. The robot's top is ~18 cm; lower bound stays above
+        # what a floor mismatch reaches in practice.
+        self.obstacle_height = (self.declare_parameter('obstacle_min_height', 0.05).value,
+                                self.declare_parameter('obstacle_max_height', 0.30).value)
+        self.obstacle_range = self.declare_parameter('obstacle_max_range', 1.8).value
+        self.grid = ObstacleGrid(self.declare_parameter('obstacle_cell', 0.08).value,
+                                 self.declare_parameter('obstacle_min_points', 15).value,
+                                 self.declare_parameter('obstacle_confirm', 2).value,
+                                 self.declare_parameter('obstacle_window', 3).value,
+                                 self.declare_parameter('obstacle_hold', 2.0).value)
         calib_dir = os.path.join(get_package_share_directory('robot_bringup'), 'config', 'calibration')
         self.calib = {side: load_calib(os.path.join(calib_dir, f'{side}.yaml')) for side in SIDES}
 
@@ -69,11 +117,14 @@ class StereoDepth(Node):
         self.info_pub = self.create_publisher(CameraInfo, '/depth/camera_info', 5)
         self.points_pub = self.create_publisher(PointCloud2, '/depth/points', 5)
         self.preview_pub = self.create_publisher(CompressedImage, '/depth/preview/compressed', 5)
+        self.obstacles_pub = self.create_publisher(PointCloud2, '/depth/obstacles', 5)
         self.static_tf = StaticTransformBroadcaster(self)
         self.publish_rect_frame()
 
         self.subs, self.frames, self.maps, self.last_done = None, {s: [] for s in SIDES}, None, 0
         self.fps, self.frame_count, self.fps_since = 0.0, 0, time.monotonic()
+        self.poses, self.yaw_rate, self.last_run = deque(maxlen=60), 0.0, 0.0
+        self.tf, self.tf_listener, self.to_base = None, None, None
         self.create_timer(1.0, self.manage)
         self.create_timer(0.03, self.process)
 
@@ -81,7 +132,7 @@ class StereoDepth(Node):
     def wanted(self):
         self.force_on = self.get_parameter('force_on').value
         return self.force_on or any(p.get_subscription_count() > 0 for p in
-                                    (self.depth_pub, self.points_pub, self.preview_pub, self.info_pub))
+                                    (self.depth_pub, self.points_pub, self.preview_pub, self.obstacles_pub))
 
     def manage(self):
         # Single-threaded executor: creating/destroying here can't race a take on another thread.
@@ -89,12 +140,17 @@ class StereoDepth(Node):
             self.subs = [self.create_subscription(Image, f'/{side}/preview/image',
                                                   lambda m, s=side: self.on_image(s, m), qos_profile_sensor_data)
                          for side in SIDES]
+            self.subs.append(self.create_subscription(Odometry, '/odom', self.on_odom, 10))
             self.get_logger().info('depth on (something is watching)')
         elif not self.wanted() and self.subs is not None:
             for sub in self.subs:
                 self.destroy_subscription(sub)
             self.subs, self.frames = None, {s: [] for s in SIDES}
+            self.poses.clear()
+            self.grid.clear()
             self.get_logger().info('depth off (nobody watching)')
+        if self.subs is not None and self.to_base is None:
+            self.lookup_to_base()
         if self.subs is not None:
             now = time.monotonic()
             self.fps = self.frame_count / (now - self.fps_since)
@@ -103,7 +159,32 @@ class StereoDepth(Node):
     def on_image(self, side, msg):
         self.frames[side] = (self.frames[side] + [msg])[-6:]
 
+    def on_odom(self, msg):
+        q = msg.pose.pose.orientation
+        yaw = np.arctan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+        self.poses.append((Time.from_msg(msg.header.stamp).nanoseconds,
+                           (msg.pose.pose.position.x, msg.pose.pose.position.y, yaw)))
+        self.yaw_rate = msg.twist.twist.angular.z
+
+    def pose_at(self, stamp_ns):
+        if not self.poses:
+            return (0.0, 0.0, 0.0)  # no odometry yet: nothing to correct for
+        return min(self.poses, key=lambda p: abs(p[0] - stamp_ns))[1]
+
     # ---------- geometry ----------
+    def lookup_to_base(self):
+        # The camera mount is fixed: one lookup, then the listener goes away.
+        if self.tf is None:
+            self.tf = Buffer()
+            self.tf_listener = TransformListener(self.tf, self)
+        try:
+            t = self.tf.lookup_transform('base_link', 'stereo_camera_left_rect', Time())
+        except Exception:  # noqa: BLE001 - TF not there yet; next second
+            return
+        self.to_base = matrix_of(t.transform)
+        self.tf_listener.unregister()
+        self.tf, self.tf_listener = None, None
+
     def publish_rect_frame(self):
         # Rectified coords = R1 * optical coords, so optical -> rect rotates by R1^T.
         t = TransformStamped()
@@ -121,6 +202,8 @@ class StereoDepth(Node):
             c = self.calib[side]
             S = np.diag([w / c['size'][0], h / c['size'][1], 1.0])  # full-res calibration -> preview pixels
             K, P = S @ c['K'], S @ c['P']
+            if side == 'right':
+                P[1, 2] += self.right_row_offset
             maps[side] = cv2.initUndistortRectifyMap(K, c['D'], c['R'], P[:, :3], size, cv2.CV_16SC2)
         P1 = np.diag([w / self.calib['left']['size'][0], h / self.calib['left']['size'][1], 1.0]) @ self.calib['left']['P']
         P2 = self.calib['right']['P']
@@ -155,11 +238,19 @@ class StereoDepth(Node):
     def process(self):
         if self.subs is None:
             return
+        if time.monotonic() - self.last_run < 1.0 / self.max_rate:
+            return
         found = self.pair()
         if found is None:
             return
         stamp_ns, left, right = found
         self.last_done = stamp_ns
+        self.last_run = time.monotonic()
+        # The exposures differ by the pair gap: while turning, that shifts the whole right image.
+        gap = abs(stamp_ns - Time.from_msg(right.header.stamp).nanoseconds) * 1e-9
+        if self.maps is not None and abs(self.yaw_rate) * gap * self.fx > self.max_yaw_error:
+            self.publish_obstacles(left.header.stamp, stamp_ns, None)
+            return
         size = (left.width, left.height)
         if self.maps is None or size != self.size:
             self.build_maps(size)
@@ -168,7 +259,8 @@ class StereoDepth(Node):
         with vpi.Backend.CUDA:
             vl = vpi.asimage(gl).convert(vpi.Format.Y16_ER, scale=256)
             vr = vpi.asimage(gr).convert(vpi.Format.Y16_ER, scale=256)
-            disp = vpi.stereodisp(vl, vr, window=5, maxdisp=self.max_disparity)
+            disp = vpi.stereodisp(vl, vr, window=5, maxdisp=self.max_disparity, p1=self.p1, p2=self.p2,
+                                  uniqueness=self.uniqueness)
             d16 = disp.cpu()  # Q10.5 fixed point (1/32 px)
         # Drop small isolated disparity islands: on plain or shiny floor these are mismatches.
         d16 = np.ascontiguousarray(d16, dtype=np.int16)
@@ -177,19 +269,43 @@ class StereoDepth(Node):
         depth = np.zeros_like(d, dtype=np.float32)
         # Outside 0.5..max_disparity is VPI's "no match" marker, not a distance.
         valid = (d > 0.5) & (d < self.max_disparity - 0.5)
-        depth[valid] = self.fx * self.baseline / d[valid]
+        depth[valid] = self.fx * self.baseline / np.maximum(d[valid] - self.disparity_offset, 0.1)
         depth[depth > self.max_range] = 0.0
         header = left.header
         header.frame_id = 'stereo_camera_left_rect'
         self.publish(header, depth, gl)
+        self.publish_obstacles(left.header.stamp, stamp_ns, depth)
         self.frame_count += 1
+
+    def publish_obstacles(self, stamp, stamp_ns, depth):
+        """Add a depth frame (None = none this time, cells still age) and publish what's confirmed."""
+        if self.to_base is None or not (self.obstacles_pub.get_subscription_count() or self.force_on):
+            return
+        now = stamp_ns * 1e-9
+        if depth is not None:
+            xyz = depth_to_base(depth, self.fx, self.fy, self.cx, self.cy, self.to_base)
+            xy = select_band(xyz, *self.obstacle_height, self.obstacle_range)
+            self.grid.update(to_odom(xy, self.pose_at(stamp_ns)), now)
+        current = self.poses[-1][1] if self.poses else (0.0, 0.0, 0.0)
+        if self.poses:  # the cells are placed relative to this pose, so that's their time
+            stamp = Time(nanoseconds=self.poses[-1][0]).to_msg()
+        xy = from_odom(self.grid.cells(now), current)
+        pts = np.column_stack([xy, np.full(len(xy), 0.15)]).astype(np.float32)
+        m = PointCloud2()
+        m.header.stamp, m.header.frame_id = stamp, 'base_link'
+        m.height, m.width = 1, len(pts)
+        m.fields = [PointField(name=n, offset=4 * i, datatype=PointField.FLOAT32, count=1)
+                    for i, n in enumerate(('x', 'y', 'z'))]
+        m.is_bigendian, m.point_step, m.row_step, m.is_dense = False, 12, 12 * len(pts), True
+        m.data = as_bytes(pts.tobytes())
+        self.obstacles_pub.publish(m)
 
     def publish(self, header, depth, gray):
         if self.depth_pub.get_subscription_count() or self.force_on:
             m = Image()
             m.header, m.height, m.width = header, depth.shape[0], depth.shape[1]
             m.encoding, m.step = '32FC1', depth.shape[1] * 4
-            m.data = depth.tobytes()
+            m.data = as_bytes(depth.tobytes())
             self.depth_pub.publish(m)
         if self.info_pub.get_subscription_count() or self.depth_pub.get_subscription_count():
             info = CameraInfo()
@@ -209,7 +325,7 @@ class StereoDepth(Node):
             vis[near] = cv2.applyColorMap((255 - scaled * 255).astype(np.uint8), cv2.COLORMAP_TURBO)[near]
             c = CompressedImage()
             c.header, c.format = header, 'jpeg'
-            c.data = cv2.imencode('.jpg', vis, [cv2.IMWRITE_JPEG_QUALITY, 70])[1].tobytes()
+            c.data = as_bytes(cv2.imencode('.jpg', vis, [cv2.IMWRITE_JPEG_QUALITY, 70])[1].tobytes())
             self.preview_pub.publish(c)
 
     def cloud(self, header, depth, gray, step=4):
@@ -227,7 +343,7 @@ class StereoDepth(Node):
         m.fields = [PointField(name=n, offset=4 * i, datatype=PointField.FLOAT32, count=1)
                     for i, n in enumerate(('x', 'y', 'z', 'rgb'))]
         m.is_bigendian, m.point_step, m.row_step, m.is_dense = False, 16, 16 * len(pts), True
-        m.data = pts.tobytes()
+        m.data = as_bytes(pts.tobytes())
         return m
 
 

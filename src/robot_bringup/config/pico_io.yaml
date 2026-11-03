@@ -1,0 +1,18 @@
+# Sensor + LED Pico (robot_bringup/pico_io.py, firmware/pico_io).
+pico_io:
+  ros__parameters:
+    port: /dev/pico_io
+    # Per group [headlights GP16, top strips GP17, tail lights GP18, spare GP19]:
+    # LED count (0 = nothing wired) and colour order: 0 GRB, 1 RGB, 2 RGBW, 3 GRBW.
+    # SK6812 RGBW parts are usually GRBW on the wire; if white shows as a colour, try 2.
+    # The RGBW rings/strips aren't fitted yet (all 0); the spare is the 8-LED RGB (GRB)
+    # test strip on the front, standing in for the headlights. On an RGB strip "white" is
+    # all three colours: 8 LEDs at 'on' draw ~0.5 A, so feed it from the 5 V buck.
+    group_counts: [0, 0, 0, 8]
+    group_types: [3, 3, 3, 0]
+    headlight_groups: [0, 3]
+    # Also show the amber warning wig-wag while mapping/exploring/navigating (the test strip,
+    # so the pattern is visible before the top strips and tail rings are fitted).
+    warning_groups: [3]
+    headlights: 'off'      # at startup: off | dim | on
+    range_frame: range_front

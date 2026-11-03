@@ -1,0 +1,28 @@
+# Lidar clean-up: rplidar_node publishes /scan_raw, this chain republishes /scan for
+# everything else (SLAM, AMCL, costmaps, rf2o, drive_guard, web UI). See drive.launch.py.
+scan_to_scan_filter_chain:
+  ros__parameters:
+    # Drop the A1's "veil" points: where a beam half-hits a near edge and half the wall
+    # behind, it reports a range in between, smearing a trail away from every edge.
+    filter1:
+      name: shadows
+      type: laser_filters/ScanShadowsFilter
+      params:
+        # Gentle on purpose: 10/170/20 (the usual example) dropped ~44% of real points on
+        # the A1, mostly walls seen at a shallow angle; this drops ~7%, mostly true veils.
+        min_angle: 3.0      # deg: a point this close to in line with the beam past a neighbour is a veil
+        max_angle: 177.0
+        neighbors: 3        # ~1 deg either side (1080 points per turn)
+        window: 1
+        remove_shadow_start_point: false
+    # Hard 6 m cutoff (the A1 is least accurate far out). Beyond it reads as "no return"
+    # (inf), exactly like a missed beam, which every consumer already handles.
+    filter2:
+      name: range
+      type: laser_filters/LaserScanRangeFilter
+      params:
+        use_message_range_limits: false
+        lower_threshold: 0.15
+        upper_threshold: 6.0
+        lower_replacement_value: .nan
+        upper_replacement_value: .inf

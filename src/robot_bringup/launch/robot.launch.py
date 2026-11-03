@@ -18,7 +18,8 @@ from launch_ros.actions import Node
 # Topics Foxglove may subscribe to. Raw camera images (~6 MB/frame) are left out
 # on purpose: one click on them would saturate Wi-Fi.
 FOXGLOVE_TOPICS = [
-    '/scan', '/odom', '/wheel/odom', '/odom_rf2o', '/battery', '/battery/status', '/tf', '/tf_static', '/cmd_vel', '/rosout',
+    '/scan', '/odom', '/wheel/odom', '/odom_rf2o', '/battery', '/battery/status', '/dock/status',
+    '/imu/apm', '/apm/status', '/range/front', '/temperature', '/humidity', '/lights/status', '/tf', '/tf_static', '/cmd_vel', '/rosout',
     '/(left|right)/preview/image/compressed', '/(left|right)/preview/camera_info',
     '/(left|right)/camera_info', '/diagnostics', '/robot_description',
     # Nav2 / SLAM, when robot_navigation is running
@@ -40,11 +41,14 @@ def generate_launch_description():
         DeclareLaunchArgument('foxglove', default_value='true'),
         DeclareLaunchArgument('rosbridge', default_value='true'),
         include('drive.launch.py'),
-        include('cameras.launch.py'),
+        # Cameras run only while something subscribes to them.
+        Node(package='robot_bringup', executable='camera_manager', output='screen'),
         # Sensor mounts come from the URDF (robot_description/urdf/robot.urdf.xacro).
         include('description.launch.py', description_dir),
         # Stereo depth from the camera previews, only while something watches it.
         Node(package='robot_bringup', executable='stereo_depth', output='screen'),
+        # Home dock by AprilTag (/robot/go_dock); idle and camera-free until called.
+        Node(package='robot_bringup', executable='dock', output='screen'),
         # Mapping / navigation on demand (Foxglove Service Call buttons on /robot/*).
         Node(package='robot_bringup', executable='nav_manager', output='screen'),
         Node(

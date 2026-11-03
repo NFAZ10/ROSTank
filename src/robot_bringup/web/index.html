@@ -71,6 +71,12 @@ canvas { display: block; width: 100%; height: 100%; touch-action: none; }
 }
 .maptools > * { pointer-events: auto; }
 .maptools .spacer { flex: 1; }
+.maplegend {
+  position: absolute; bottom: 30px; right: 10px; display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end;
+  padding: 4px 8px; font-size: 12px; color: var(--muted); background: var(--panel); border-radius: 6px;
+  pointer-events: none; box-shadow: 0 1px 3px rgba(0,0,0,.12);
+}
+.maplegend i { display: inline-block; width: 10px; height: 10px; margin-right: 4px; border-radius: 2px; vertical-align: -1px; }
 .maphint {
   position: absolute; bottom: 10px; left: 10px; right: 10px; font-size: 12.5px; color: var(--muted);
   pointer-events: none; text-shadow: 0 0 4px var(--panel);
@@ -94,9 +100,15 @@ button.on { background: var(--goal); color: #fff; border-color: var(--goal); }
 .msg { font-size: 13px; color: var(--muted); margin-top: 10px; min-height: 1.4em; overflow-wrap: anywhere; }
 .msg.err { color: var(--danger); }
 
-.pad { display: grid; grid-template-columns: repeat(3, 64px); grid-template-rows: repeat(3, 52px); gap: 6px; justify-content: center; }
-.pad button { font-size: 20px; padding: 0; }
-.pad button:active, .pad button.held { background: var(--accent); color: var(--accent-ink); }
+.joy { position: relative; width: 180px; height: 180px; margin: 0 auto; border-radius: 50%;
+  background: var(--bg); border: 1px solid var(--line); touch-action: none; user-select: none; -webkit-user-select: none;
+  background-image: linear-gradient(var(--line), var(--line)), linear-gradient(var(--line), var(--line));
+  background-size: 1px 100%, 100% 1px; background-position: center; background-repeat: no-repeat; cursor: grab; }
+.joy .knob { position: absolute; width: 64px; height: 64px; border-radius: 50%; pointer-events: none;
+  left: calc(50% + var(--jx, 0) * (50% - 32px)); top: calc(50% + var(--jy, 0) * (50% - 32px)); transform: translate(-50%, -50%);
+  background: var(--panel); border: 1px solid var(--muted); box-shadow: 0 2px 6px rgba(0,0,0,.18); }
+.joy.held { cursor: grabbing; }
+.joy.held .knob { background: var(--accent); border-color: var(--accent); }
 label.slider { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
 label.slider input { flex: 1; accent-color: var(--accent); }
 
@@ -157,6 +169,7 @@ label.slider input { flex: 1; accent-color: var(--accent); }
   <span class="pill"><span class="dot" id="dPico"></span>Drive</span>
   <span class="pill"><span class="dot" id="dLidar"></span>Lidar</span>
   <span class="pill" title="Pack voltage and approximate charge (LiFePO4)"><span class="dot" id="dBatt"></span>Battery <b id="tBatt">—</b></span>
+  <span class="pill" title="Sensor/LED board: temperature and humidity (DHT11)"><span class="dot" id="dIO"></span>IO <b id="tIO">—</b></span>
   <button class="danger estop" id="estop">STOP</button>
 </header>
 
@@ -166,11 +179,17 @@ label.slider input { flex: 1; accent-color: var(--accent); }
     <div class="maptools">
       <button id="toolGoal" title="Drag on the map: where to go, and which way to face">Goal</button>
       <button id="toolPose" title="Drag on the map: where the robot really is, and which way it faces">Set pose</button>
+      <button id="locBtn" data-nav="localize" hidden title="Turn on the spot until the lidar matches the map (after Set pose)">Localize</button>
+      <button id="checkDockBtn" data-nav="check_dock" hidden title="Look (without moving) for the dock's AprilTag and remember where it is">Check for dock</button>
+      <button id="dockBtn" data-nav="go_dock" hidden title="Find the dock's AprilTag and drive up to it">Go to dock</button>
+      <button id="findBtn" data-nav="find_myself" hidden title="Work out where it is on the whole map from scratch, by turning on the spot">Find me</button>
       <span class="spacer"></span>
+      <button id="costmapBtn" title="Show what Nav2 plans around: its global costmap, and the local one around the robot">Costmap</button>
       <button id="follow" class="on" title="Keep the robot centred">Follow</button>
       <button id="zoomOut" aria-label="Zoom out">−</button>
       <button id="zoomIn" aria-label="Zoom in">+</button>
     </div>
+    <div class="maplegend" id="costLegend" hidden></div>
     <div class="maphint" id="hint"></div>
   </section>
 
@@ -197,16 +216,18 @@ label.slider input { flex: 1; accent-color: var(--accent); }
         </div>
         <div class="camview"><img id="cam" alt=""><span id="camMsg">Connecting…</span></div>
       </div>
-      <div class="pad">
-        <span></span><button data-drive="1,0" aria-label="Forward">▲</button><span></span>
-        <button data-drive="0,1" aria-label="Turn left">◀</button>
-        <button data-halt aria-label="Stop">■</button>
-        <button data-drive="0,-1" aria-label="Turn right">▶</button>
-        <span></span><button data-drive="-1,0" aria-label="Back">▼</button><span></span>
-      </div>
+      <div class="joy" id="joy" role="application" aria-label="Drive joystick: up/down drives, left/right turns"><div class="knob"></div></div>
       <label class="slider">Speed <input type="range" id="speed" min="0.05" max="0.4" step="0.01" value="0.2"> <span id="speedVal">0.20 m/s</span></label>
-      <div class="msg" style="margin-top:6px">Hold a button, or use the arrow keys / WASD. The robot slows near obstacles and stops 12 cm short.</div>
+      <div class="row seg" style="margin-top:8px; align-items:center">
+        <span>Headlights</span>
+        <button data-head="off">Off</button>
+        <button data-head="dim" title="Dimmed LEDs flicker on camera; use On while recording">Dim</button>
+        <button data-head="on">On</button>
+        <span class="msg" id="rangeMsg" style="margin:0 0 0 auto" title="VL53L0X front distance sensor"></span>
+      </div>
+      <div class="msg" style="margin-top:6px">Drag the joystick (up/down drives, left/right turns), or use the arrow keys / WASD. The robot slows near obstacles and stops 12 cm short.</div>
       <div class="msg" id="guardMsg" style="margin-top:0"></div>
+      <button id="guardOverride" style="width:100%; margin-top:6px" title="Joystick only, at a reduced speed. Turns itself off after 20 s without driving.">Override obstacle protection</button>
     </section>
 
     <section class="card panel" data-panel="maps" role="tabpanel" hidden>
@@ -239,6 +260,7 @@ label.slider input { flex: 1; accent-color: var(--accent); }
       <div class="links">
         <a href="/encoders">Encoders →<span>Live track counts and speeds, spin one track</span></a>
         <a href="/calibrate">Camera calibration →<span>Stereo checkerboard calibration</span></a>
+        <a href="/mapedit">Map editor →<span>Clean up saved maps: paint walls, free space, unknown</span></a>
       </div>
     </section>
 
@@ -304,6 +326,20 @@ let lastStraight = null, lastSpin = null, lastTestKey = '';
 
 function setDot(id, cls) { $(id).className = 'dot ' + cls; }
 
+function showIO(io) {
+  const t = io.temp_ok ? `${io.temp.toFixed(0)}°C` + (io.humidity_ok ? ` · ${io.humidity.toFixed(0)}%` : '') : '';
+  $('tIO').textContent = t || (io.connected ? 'on' : '—');
+  setDot('dIO', io.connected ? 'ok' : state.stack === 'active' ? 'bad' : '');
+  document.querySelectorAll('[data-head]').forEach((b) => {
+    b.classList.toggle('on', b.dataset.head === io.headlights);
+    b.disabled = !io.connected;
+  });
+  $('rangeMsg').textContent = !io.range_ok ? '' : io.range === null ? 'Front: clear' : `Front: ${Math.round(io.range * 100)} cm`;
+}
+document.querySelectorAll('[data-head]').forEach((b) => {
+  b.onclick = () => api('/api/lights', { headlights: b.dataset.head }).then(pollState).catch(() => {});
+});
+
 async function pollState() {
   try {
     state = await api('/api/state');
@@ -327,9 +363,13 @@ async function pollState() {
     const b = state.battery || {};
     $('tBatt').textContent = b.present ? `${b.voltage.toFixed(1)} V · ${b.percent}%` : '—';
     setDot('dBatt', !b.present ? '' : /critical|shutting/.test(b.status) ? 'bad' : /low/.test(b.status) ? 'busy' : 'ok');
+    showIO(state.io || {});
     const g = state.guard || '';
-    $('guardMsg').textContent = /stopped|slowing|waiting/.test(g) ? 'Guard: ' + g : '';
-    $('guardMsg').classList.toggle('err', g.startsWith('stopped'));
+    const overridden = g.startsWith('override');
+    $('guardMsg').textContent = /stopped|slowing|waiting|override/.test(g) ? 'Guard: ' + g : '';
+    $('guardMsg').classList.toggle('err', g.startsWith('stopped') || overridden);
+    $('guardOverride').classList.toggle('danger', overridden);
+    $('guardOverride').textContent = overridden ? 'Turn protection back on' : 'Override obstacle protection';
   } catch (e) {
     $('tStack').textContent = 'page offline'; setDot('dStack', 'bad');
     $('tMode').textContent = '—'; setDot('dMode', ''); setDot('dPico', ''); setDot('dLidar', '');
@@ -339,6 +379,76 @@ async function pollState() {
 async function pollScan() {
   if (document.visibilityState !== 'visible') return;
   try { const s = await api('/api/scan'); scan = s.ok ? s : null; } catch (e) { scan = null; }
+}
+
+// ---------------- costmap overlay ----------------
+const COST_LEGEND = '<span><i style="background:rgb(74,20,140)"></i>Obstacle</span>'
+  + '<span><i style="background:rgb(190,40,170)"></i>Robot would touch</span>'
+  + '<span><i style="background:rgba(190,40,170,.35)"></i>Keep-away</span>';
+let costmaps = {}, costmapOn = false, costmapFrame = null, costmapMsg = '';
+try { costmapOn = localStorage.getItem('robotCostmap') === '1'; } catch (e) { /* storage blocked: fine */ }
+
+// Cells: 0 free and 255 (-1) unknown stay see-through, so the map shows under them.
+function costColor(v) {
+  if (v === 100) return [74, 20, 140, 230];
+  if (v === 99) return [190, 40, 170, 200];
+  if (v >= 1 && v <= 98) return [190, 40, 170, Math.round(25 + v * 1.1)];
+  return [0, 0, 0, 0];
+}
+
+function costCanvas(m) {
+  const bytes = Uint8Array.from(atob(m.data), (c) => c.charCodeAt(0));
+  const c = document.createElement('canvas');
+  c.width = m.width; c.height = m.height;
+  const g = c.getContext('2d'), img = g.createImageData(m.width, m.height);
+  for (let row = 0; row < m.height; row++) {   // grid row 0 is the bottom: flip, as for the map
+    for (let col = 0; col < m.width; col++) {
+      img.data.set(costColor(bytes[row * m.width + col]), ((m.height - 1 - row) * m.width + col) * 4);
+    }
+  }
+  g.putImageData(img, 0, 0);
+  return c;
+}
+
+function showCostmapState() {
+  $('costmapBtn').classList.toggle('on', costmapOn);
+  const legend = $('costLegend');
+  legend.hidden = !costmapOn;
+  if (costmapOn) legend.innerHTML = costmapMsg ? `<span>${costmapMsg}</span>` : COST_LEGEND;
+}
+
+async function pollCostmap() {
+  if (!costmapOn || document.visibilityState !== 'visible') return;
+  const have = Object.entries(costmaps).map(([k, v]) => `${k}=${v.seq}`).join('&');
+  try {
+    const r = await api('/api/costmap?' + have), next = {};
+    for (const [name, m] of Object.entries(r.layers)) {
+      const old = costmaps[name];
+      if (m.data) next[name] = { ...m, canvas: costCanvas(m) };
+      else if (old) next[name] = { ...old, origin: m.origin };
+    }
+    costmaps = next; costmapFrame = r.frame;
+    costmapMsg = Object.keys(next).length ? '' : 'No costmap yet: start mapping or navigating';
+  } catch (e) {
+    costmaps = {};
+    costmapMsg = 'Costmap unavailable: restart the web UI';
+  }
+  showCostmapState();
+}
+
+function drawCostmaps() {
+  if (!costmapOn || !state || costmapFrame !== state.frame) return;
+  ctx.imageSmoothingEnabled = false;
+  for (const [name, alpha] of [['global', .55], ['local', 1]]) {  // global is the background; local is what's live
+    const m = costmaps[name];
+    if (!m) continue;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(m.origin.x, m.origin.y); ctx.rotate(m.origin.yaw);
+    ctx.scale(1, -1);
+    ctx.drawImage(m.canvas, 0, -m.height * m.resolution, m.width * m.resolution, m.height * m.resolution);
+    ctx.restore();
+  }
 }
 
 async function loadMap(seq) {
@@ -399,6 +509,8 @@ function draw() {
     ctx.restore();
   }
 
+  drawCostmaps();
+
   // 1 m grid
   const tl = toWorld(0, 0), br = toWorld(W, H);
   ctx.strokeStyle = css('--grid'); ctx.lineWidth = px;
@@ -416,6 +528,30 @@ function draw() {
       const a = L.yaw + scan.angle_min + i * scan.angle_increment;
       ctx.fillRect(L.x + r * Math.cos(a) - s / 2, L.y + r * Math.sin(a) - s / 2, s, s);
     }
+  }
+
+  // planned route (Nav2 /plan) and the dock, map frame only
+  if (state && state.frame === 'map' && state.plan && state.plan.length > 1) {
+    const pts = state.plan, end = pts[pts.length - 1];
+    ctx.strokeStyle = ctx.fillStyle = css('--goal'); ctx.lineWidth = 3 * px;
+    ctx.setLineDash([10 * px, 6 * px]);
+    ctx.beginPath(); pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath(); ctx.arc(end[0], end[1], 7 * px, 0, 2 * Math.PI); ctx.stroke();
+  }
+  if (state && state.frame === 'map' && state.dock_pose) {
+    const d = state.dock_pose, APPROACH = 0.45;  // = dock.py approach: the tag is this far ahead
+    ctx.save(); ctx.translate(d.x, d.y); ctx.rotate(d.yaw);
+    ctx.strokeStyle = ctx.fillStyle = css('--warn'); ctx.lineWidth = 2 * px;
+    ctx.setLineDash([6 * px, 4 * px]); ctx.strokeRect(-ROBOT_L / 2, -ROBOT_W / 2, ROBOT_L, ROBOT_W); ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(ROBOT_L / 2, 0); ctx.lineTo(APPROACH - 0.06, 0); ctx.stroke();
+    ctx.fillRect(APPROACH - 0.015, -0.06, 0.03, 0.12);   // the tag, edge-on
+    ctx.restore();
+    const sx = W / 2 + (d.x - view.x) * view.scale, sy = H / 2 - (d.y - view.y) * view.scale;
+    ctx.save(); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.font = '600 12px system-ui, sans-serif'; ctx.fillStyle = css('--warn'); ctx.textAlign = 'center';
+    ctx.fillText('Dock', sx, sy - Math.max(18, ROBOT_L * view.scale * 0.7));
+    ctx.restore();
   }
 
   // robot
@@ -514,7 +650,8 @@ function showNav(st) {
   const g = st.goal || {};
   if (st.mode === 'off') { html = 'Robot stack is off.'; cls = 'err'; }
   else if (st.mode === 'mapping') {
-    html = st.localized ? '<b>Mapping.</b> Drive around (or set goals), then name and save the map.'
+    html = st.localized ? (st.nav_map ? `<b>Continuing “${st.nav_map}”.</b> Drive into the new areas, then save it under the same name.`
+      : '<b>Mapping.</b> Drive around (or set goals), then name and save the map.')
       : '<b>Mapping</b> is starting…';
     cls = st.localized ? 'ok' : 'warn';
   } else if (st.mode === 'exploring') {
@@ -522,7 +659,8 @@ function showNav(st) {
     cls = 'ok';
   } else if (st.mode === 'navigating') {
     html = st.localized ? `<b>Navigating</b> on “${st.nav_map}”. Use Goal on the map.`
-      : `<b>Waiting for pose</b> on “${st.nav_map}”. Use <b>Set pose</b> on the map to show where the robot is.`;
+      : `<b>Waiting for pose</b> on “${st.nav_map}”. Use <b>Set pose</b>, or <b>Find me</b>.`;
+    if (st.localize) html += `<br>${st.localize}`;
     cls = st.localized ? 'ok' : 'warn';
   } else { html = 'Idle. Start mapping, or pick a saved map below.'; }
   if (st.mode === 'mapping' || st.mode === 'navigating') {
@@ -531,7 +669,12 @@ function showNav(st) {
     else if (g.status === 'failed' || g.status === 'rejected') { html += `<br>${g.message}`; cls = 'err'; }
   }
   el.innerHTML = html; el.className = 'navstatus ' + cls;
+  $('locBtn').hidden = $('findBtn').hidden = st.mode !== 'navigating';
+  $('dockBtn').hidden = !['mapping', 'navigating'].includes(st.mode);
+  $('checkDockBtn').hidden = !['mapping', 'exploring', 'navigating'].includes(st.mode);
+  if (st.dock && ['mapping', 'exploring', 'navigating'].includes(st.mode)) el.innerHTML += `<br>Dock: ${st.dock}`;
   $('saveBtn').disabled = !['mapping', 'exploring'].includes(st.mode);
+  if (st.nav_map && ['mapping', 'exploring'].includes(st.mode) && !$('mapName').value && document.activeElement !== $('mapName')) $('mapName').value = st.nav_map;
   $('mapName').disabled = !['mapping', 'exploring'].includes(st.mode);
   document.querySelectorAll('.maplist li[data-map]').forEach((li) =>
     li.classList.toggle('current', st.mode === 'navigating' && li.dataset.map === st.nav_map));
@@ -551,9 +694,11 @@ async function loadMaps() {
       const size = m.size_m ? `${m.size_m[0]} × ${m.size_m[1]} m · ` : '';
       li.innerHTML = `<img alt="" src="/api/maps/${encodeURIComponent(m.name)}.png?t=${m.modified}">
         <div class="meta"><b></b>${size}${fmtDate(m.modified)}${m.has_pose ? ' · remembers robot pose' : ''}</div>
-        <div class="acts"><button class="primary" data-act="navigate">Navigate</button><button data-act="delete">Delete</button></div>`;
+        <div class="acts"><button class="primary" data-act="navigate">Navigate</button>${m.can_continue ? '<button data-act="continue" title="Keep mapping: add to this map">Continue</button>' : ''}<button data-act="edit">Edit</button><button data-act="delete">Delete</button></div>`;
       li.querySelector('b').textContent = m.name + (m.latest ? ' (latest)' : '');
       li.querySelector('[data-act="navigate"]').onclick = () => mapAction('navigate', m.name);
+      if (m.can_continue) li.querySelector('[data-act="continue"]').onclick = () => mapAction('continue', m.name);
+      li.querySelector('[data-act="edit"]').onclick = () => { location.href = '/mapedit?map=' + encodeURIComponent(m.name); };
       li.querySelector('[data-act="delete"]').onclick = (e) => {
         const b = e.currentTarget;
         if (b.dataset.armed) { mapAction('delete', m.name); return; }
@@ -566,7 +711,7 @@ async function loadMaps() {
   } catch (e) { /* page offline: keep the last list */ }
 }
 async function mapAction(act, name) {
-  note('navMsg', (act === 'navigate' ? 'Starting navigation on ' : 'Deleting ') + name + '…');
+  note('navMsg', ({ navigate: 'Starting navigation on ', continue: 'Continuing ' }[act] || 'Deleting ') + name + '…');
   try {
     const r = await api('/api/maps/' + act, { name });
     note('navMsg', r.message, !r.success);
@@ -608,7 +753,7 @@ function camStart() {
     img.removeAttribute('src'); $('camMsg').textContent = camSide ? 'Paused' : 'Camera off';
     return;
   }
-  $('camMsg').textContent = 'Connecting…';
+  $('camMsg').textContent = 'Starting camera, about 20 s…';
   img.src = '/stream/' + camSide + '?t=' + Date.now();
 }
 $('cam').onload = () => $('cam').parentElement.classList.add('live');
@@ -640,30 +785,55 @@ document.querySelectorAll('[data-stack]').forEach((btn) => {
 });
 
 // ---------------- drive ----------------
-let driveTimer = null, driveBtn = null;
+let driveTimer = null, driveCmd = [0, 0];
 const speed = () => parseFloat($('speed').value);
 $('speed').oninput = () => { $('speedVal').textContent = speed().toFixed(2) + ' m/s'; };
+const joy = $('joy');
 
-function startDrive(lin, ang, btn) {
-  stopDrive(false);
-  driveBtn = btn; if (btn) btn.classList.add('held');
-  const send = () => api('/api/drive', { v: lin * speed(), w: ang * speed() * 5 }).catch(() => {});
+// Knob position in [-1, 1] (x right, y down); keys move it too so it shows what is being sent.
+function showKnob(x, y) { joy.style.setProperty('--jx', x); joy.style.setProperty('--jy', y); }
+
+// lin/ang are fractions of full speed; the 100 ms resend always uses the latest command.
+function startDrive(lin, ang) {
+  driveCmd = [lin, ang];
+  if (driveTimer) return;
+  const send = () => api('/api/drive', { v: driveCmd[0] * speed(), w: driveCmd[1] * speed() * 5 }).catch(() => {});
   send(); driveTimer = setInterval(send, 100);
 }
+$('guardOverride').addEventListener('click', () => {
+  const on = !$('guardOverride').classList.contains('danger');
+  api('/api/guard/override', { on }).catch((e) => { $('guardMsg').textContent = e.message; $('guardMsg').classList.add('err'); });
+});
 function stopDrive(halt = true) {
   if (driveTimer) clearInterval(driveTimer);
-  if (driveBtn) driveBtn.classList.remove('held');
   const wasDriving = !!driveTimer;
-  driveTimer = null; driveBtn = null;
+  driveTimer = null; driveCmd = [0, 0];
+  joy.classList.remove('held'); showKnob(0, 0);
   if (halt && wasDriving) api('/api/halt', {}).catch(() => {});
 }
-document.querySelectorAll('[data-drive]').forEach((btn) => {
-  const [lin, ang] = btn.dataset.drive.split(',').map(Number);
-  btn.addEventListener('pointerdown', (e) => { e.preventDefault(); startDrive(lin, ang, btn); });
-  ['pointerup', 'pointerleave', 'pointercancel'].forEach((ev) => btn.addEventListener(ev, () => stopDrive()));
+
+let joyPointer = null;
+function joyMove(e) {
+  const r = joy.getBoundingClientRect(), reach = r.width / 2 - 32;
+  let x = (e.clientX - r.left - r.width / 2) / reach, y = (e.clientY - r.top - r.height / 2) / reach;
+  const m = Math.hypot(x, y);
+  if (m > 1) { x /= m; y /= m; }
+  showKnob(x, y);
+  // Small dead zone around the centre so a resting thumb doesn't creep.
+  const dz = (v) => (Math.abs(v) < 0.12 ? 0 : (v - Math.sign(v) * 0.12) / 0.88);
+  startDrive(-dz(y), -dz(x));
+}
+joy.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  joy.setPointerCapture(e.pointerId); joyPointer = e.pointerId;
+  joy.classList.add('held'); joyMove(e);
 });
-const halt = () => { stopDrive(false); api('/api/halt', {}).catch(() => {}); };
-document.querySelector('[data-halt]').onclick = halt;
+joy.addEventListener('pointermove', (e) => { if (e.pointerId === joyPointer) joyMove(e); });
+['pointerup', 'pointercancel', 'lostpointercapture'].forEach((ev) => joy.addEventListener(ev, (e) => {
+  if (e.pointerId !== joyPointer) return;
+  joyPointer = null; stopDrive();
+}));
+const halt = () => { joyPointer = null; stopDrive(false); api('/api/halt', {}).catch(() => {}); };
 $('estop').onclick = () => { halt(); api('/api/nav/stop', {}).then((r) => note('navMsg', r.message)).catch(() => {}); };
 
 const KEYS = { ArrowUp: [1, 0], w: [1, 0], ArrowDown: [-1, 0], s: [-1, 0], ArrowLeft: [0, 1], a: [0, 1], ArrowRight: [0, -1], d: [0, -1] };
@@ -671,10 +841,10 @@ let keyHeld = null;
 document.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT') return;
   const k = KEYS[e.key]; if (!k || keyHeld === e.key) return;
-  e.preventDefault(); keyHeld = e.key; startDrive(k[0], k[1], null);
+  e.preventDefault(); keyHeld = e.key; startDrive(k[0], k[1]); showKnob(-k[1], -k[0]);
 });
 document.addEventListener('keyup', (e) => { if (e.key === keyHeld) { keyHeld = null; stopDrive(); } });
-window.addEventListener('blur', () => { keyHeld = null; stopDrive(); });
+window.addEventListener('blur', () => { keyHeld = null; joyPointer = null; stopDrive(); });
 
 // ---------------- calibration ----------------
 function showCalib(c) {
@@ -751,6 +921,15 @@ showTab(savedTab);
 pollState(); pollScan();
 setInterval(() => { pollState().then(updateHint); }, 300);
 setInterval(pollScan, 200);
+setInterval(pollCostmap, 1000);
+$('costmapBtn').addEventListener('click', () => {
+  costmapOn = !costmapOn;
+  costmaps = {}; costmapMsg = '';
+  try { localStorage.setItem('robotCostmap', costmapOn ? '1' : '0'); } catch (e) { /* storage blocked: fine */ }
+  showCostmapState();
+  pollCostmap();
+});
+showCostmapState();
 requestAnimationFrame(draw);
 </script>
 </body>

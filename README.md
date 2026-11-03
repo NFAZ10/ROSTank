@@ -25,14 +25,20 @@ robot wheels                 # live encoder counts/speeds per track
 ```bash
 robot map start              # SLAM: drive around (robot drive) to build the map
 robot map explore            # or let it map on its own; comes back when done, then save
+robot map continue kitchen   # keep adding to a saved map (start near where the robot last was on it), save as kitchen
 robot map save kitchen       # name: letters, digits, - _
 robot map list
 robot map nav kitchen        # navigate on it (no name = latest). Starts where the robot last was.
 robot pose 1.2 0.5 90        # if the robot was moved: where it really is (x m, y m, facing deg)
+robot localize               # then turn on the spot until the lidar matches the map
+robot findme                 # or: work out where it is from scratch (no pose needed)
+robot dock                   # find the dock's AprilTag (tag36h11 id 0, 9 cm black square,
+                             # upright, centre ~7 cm high) and stop 45 cm in front of it
 robot goal 2.0 1.0 0         # drive there; prints metres to go; Ctrl-C cancels
 robot where                  # current position
 robot map stop
 robot map delete kitchen
+# hand-edit a saved map: web UI → Maps → Edit (or /mapedit); original kept, Revert restores it
 ```
 Map coordinates: x/y in metres from where mapping started, angles in degrees, 0 = the
 direction the robot faced at the start, positive = counter-clockwise. The web UI map shows
@@ -44,10 +50,19 @@ robot calib                  # wheel_radius, track_width, invert/swap flags
 robot calib set track_width=0.19 wheel_radius=0.031   # live + saved to drive.yaml
 robot snap left              # picture to ~/robot_snaps/ (left | right | depth)
 robot depth                  # stereo distance to what's left / ahead / right
+robot guard off | on         # obstacle protection for manual driving (or the Drive tab button)
 ```
-Stereo depth runs only while something watches it: web UI → Drive → **Depth** (red near,
+Each camera runs only while something uses it (a view of it, depth, dock), so it takes about
+20 s to start; `robot status` shows which are on. Stereo depth runs only while something watches it: web UI → Drive → **Depth** (red near,
 blue far, black unknown), `robot depth`, or Foxglove on `/depth/points` or `/depth/image`.
-It measures about 0.5–6 m, at about 4–8 fps.
+It measures about 0.25–6 m, at about 4–8 fps.
+Overriding protection affects only manual driving (joystick, `robot drive`), limits it to
+0.15 m/s, and ends after 20 s without a manual command; Nav2 stays protected.
+While driving, `drive_guard` also stops for `/depth/obstacles`: depth cut to 5–30 cm above the
+floor and within 1.8 m, counted only once seen in 2 of 3 frames. After moving the cameras,
+update `camera_pitch` (URDF) and `right_row_offset` (`stereo_depth`), or recalibrate.
+The APM flight controller is a sensor board: `apm_imu` publishes its gyro and accelerometer on
+`/imu/apm` at 50 Hz. Keep its servo outputs disconnected, and the robot still when it first powers up.
 Drive calibration (1 m straight, 360° spin): web UI → Calibration.
 Stereo camera calibration: web UI → Camera calibration (`/calibrate`).
 

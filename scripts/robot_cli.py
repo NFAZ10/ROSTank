@@ -27,6 +27,7 @@ from rclpy.time import Time
 import numpy as np
 from sensor_msgs.msg import BatteryState, CompressedImage, Image, JointState, LaserScan
 from std_msgs.msg import String
+from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformListener
 
 WS = os.path.expanduser('~/robot_ws')
@@ -68,6 +69,14 @@ class Cli(Node):
         m = self.latest(String, '/robot/nav_mode', 1.5, LATCHED)
         return m.data if m else 'off'
 
+    def guard(self, state):
+        c = self.create_client(SetBool, '/drive_guard/override')
+        if not c.wait_for_service(timeout_sec=5.0):
+            die('drive guard is not responding (robot restart)')
+        future = c.call_async(SetBool.Request(data=state == 'off'))
+        self.spin_for(5.0, future.done)
+        print(future.result().message if future.done() else 'no answer from the drive guard')
+
     def halt(self):
         for _ in range(5):
             self.cmd_pub.publish(Twist())
@@ -75,9 +84,8 @@ class Cli(Node):
 
     # ---------- status ----------
     def status_topics(self):
-        topics = {'/wheel/odom': Odometry, '/odom': Odometry, '/scan': LaserScan,
-                  '/left/preview/image/compressed': CompressedImage,
-                  '/right/preview/image/compressed': CompressedImage}
+        # Not the cameras: subscribing would start them (camera_manager.py).
+        topics = {'/wheel/odom': Odometry, '/odom': Odometry, '/scan': LaserScan}
         counts = {t: 0 for t in topics}
         for t, ty in topics.items():
             self.create_subscription(ty, t, lambda m, t=t: counts.__setitem__(t, counts[t] + 1),
@@ -96,19 +104,30 @@ class Cli(Node):
             nonlocal guard
             guard = m.data
         self.create_subscription(String, '/drive_guard/status', on_guard, LATCHED)
+        cameras = None
+        def on_cameras(m):
+            nonlocal cameras
+            cameras = m.data
+        self.create_subscription(String, '/cameras/status', on_cameras, LATCHED)
+        apm = None
+        def on_apm(m):
+            nonlocal apm
+            apm = m.data
+        self.create_subscription(String, '/apm/status', on_apm, LATCHED)
         batt = []
         self.create_subscription(BatteryState, '/battery', batt.append, 10)
         self.spin_for(0.5)  # discovery
         for t in counts:
             counts[t] = 0
         self.spin_for(2.0)
-        label = {'/wheel/odom': 'drive (Pico)', '/odom': 'fused odometry', '/scan': 'lidar',
-                 '/left/preview/image/compressed': 'left camera', '/right/preview/image/compressed': 'right camera'}
+        label = {'/wheel/odom': 'drive (Pico)', '/odom': 'fused odometry', '/scan': 'lidar'}
         for t, n in counts.items():
             hz = n / 2.0
             state = 'ok' if hz > 1 else ('idle' if t == '/scan' else 'NO DATA')
             note = '  (motor spins only while something uses it)' if t == '/scan' and hz == 0 else ''
             print(f'  {label[t]:<16} {hz:5.1f} Hz  {state}{note}')
+        print(f'  {"cameras":<16} {cameras or "unknown"}')
+        print(f'  {"APM IMU":<16} {apm or "unknown"}')
         print(f'  {"nav mode":<16} {mode or "unknown"}' + (f'  on map "{map_name}"' if map_name else ''))
         print(f'  {"drive guard":<16} {guard or "not running"}')
         b = batt[-1] if batt else None
@@ -277,7 +296,7 @@ class Cli(Node):
 
     def snap(self, side='left'):
         topic = '/depth/preview/compressed' if side == 'depth' else f'/{side}/preview/image/compressed'
-        msg = self.latest(CompressedImage, topic, 8.0, qos_profile_sensor_data)
+        msg = self.latest(CompressedImage, topic, 45.0, qos_profile_sensor_data)  # a camera may need to start
         if msg is None:
             die(f'no image from the {side} camera (robot status)')
         out_dir = os.path.expanduser('~/robot_snaps')
@@ -289,7 +308,7 @@ class Cli(Node):
 
     def depth_ahead(self):
         """Distance to what's straight ahead, from stereo depth (starts it while we watch)."""
-        msg = self.latest(Image, '/depth/image', 8.0, qos_profile_sensor_data)
+        msg = self.latest(Image, '/depth/image', 45.0, qos_profile_sensor_data)  # the cameras may need to start
         if msg is None:
             die('no depth: are both cameras running? (robot status)')
         d = np.frombuffer(msg.data, np.float32).reshape(msg.height, msg.width)
@@ -429,6 +448,8 @@ def main():
             node.turn(*f[:2]) if f else die('usage: robot turn <degrees> [rate rad/s]   (positive = left)')
         elif cmd == 'stop':
             node.stop()
+        elif cmd == 'guard':
+            node.guard(rest[0]) if rest and rest[0] in ('on', 'off') else die('usage: robot guard off | on')
         elif cmd == 'goal':
             node.goal(*f[:3]) if len(f) >= 2 else die('usage: robot goal <x> <y> [facing deg]')
         elif cmd == 'pose':

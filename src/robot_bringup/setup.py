@@ -17,6 +17,7 @@ setup(
         ('share/' + package_name + '/web', glob('web/*')),
     ],
     install_requires=['setuptools'],
+    tests_require=['pytest'],
     zip_safe=True,
     entry_points={
         'console_scripts': [
@@ -28,6 +29,10 @@ setup(
             'drive_guard = robot_bringup.drive_guard:main',
             'explorer = robot_bringup.explorer:main',
             'battery_guard = robot_bringup.battery_guard:main',
+            'dock = robot_bringup.dock:main',
+            'camera_manager = robot_bringup.camera_manager:main',
+            'apm_imu = robot_bringup.apm_imu:main',
+            'pico_io = robot_bringup.pico_io:main',
         ],
     },
 )

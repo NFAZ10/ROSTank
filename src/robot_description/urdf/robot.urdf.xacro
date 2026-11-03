@@ -26,11 +26,13 @@
   <xacro:property name="body_clearance" value="0.03"/>   <!-- top deck at 0.124 -->
   <xacro:property name="body_mass" value="1.5"/>
   <!-- Sensor mounts, relative to base_link -->
-  <xacro:property name="laser_x" value="0.0"/>             <!-- est -->
-  <xacro:property name="laser_z" value="0.18"/>          <!-- scan plane height -->
+  <xacro:property name="laser_x" value="-0.010"/>          <!-- 160 mm behind the front edge, centred (measured 2026-10-30) -->
+  <xacro:property name="laser_z" value="0.155"/>         <!-- scan plane height, measured 2026-10-30 -->
   <xacro:property name="laser_yaw" value="${pi}"/>        <!-- A1 mounted facing backwards (user, 2026-10-28) -->
+  <xacro:property name="apm_yaw" value="${pi}"/>          <!-- APM board mounted facing backwards (user, 2026-11-03); flat to ~2 deg by gravity -->
   <xacro:property name="camera_x" value="0.13"/>            <!-- est -->
   <xacro:property name="camera_z" value="0.07"/>         <!-- lens centres above the floor, measured 2026-10-28 -->
+  <xacro:property name="camera_pitch" value="${radians(-21.7)}"/>  <!-- negative = looking up; fitted to floor features in depth, 2026-11-02 -->
   <xacro:property name="camera_baseline" value="0.0588"/>        <!-- = right.yaml Tx / fx -->
 
   <xacro:property name="sprocket_spacing" value="${track_length - 2 * wheel_radius}"/>
@@ -135,6 +137,14 @@
     <origin xyz="${laser_x} 0 ${laser_z}" rpy="0 0 ${laser_yaw}"/>
   </joint>
 
+  <!-- APM sensor board (apm_imu.py). Position not measured: only its rotation matters for rates. -->
+  <link name="apm_imu"/>
+  <joint name="apm_imu_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="apm_imu"/>
+    <origin xyz="0 0 0" rpy="0 0 ${apm_yaw}"/>
+  </joint>
+
   <!-- Stereo pair. stereo_camera is the frame the Argus nodes use as camera link. -->
   <link name="stereo_camera">
     <visual>
@@ -146,7 +156,7 @@
   <joint name="stereo_camera_joint" type="fixed">
     <parent link="base_link"/>
     <child link="stereo_camera"/>
-    <origin xyz="${camera_x} 0 ${camera_z}"/>
+    <origin xyz="${camera_x} 0 ${camera_z}" rpy="0 ${camera_pitch} 0"/>
   </joint>
 
   <xacro:macro name="camera_eye" params="side y">

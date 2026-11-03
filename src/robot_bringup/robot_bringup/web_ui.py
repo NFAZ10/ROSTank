@@ -5,6 +5,8 @@ nav goals, and drive calibration (direction test, 1 m straight, 360 degree spin)
 /encoders: live hall-encoder counts and speeds per track, and hold-to-spin one track (web/encoders.html).
 /calibrate: stereo checkerboard calibration (live detection, auto-capture, OpenCV calibration,
 writes config/calibration/left.yaml + right.yaml; see stereo_calib.py).
+/mapedit: hand-edit a saved map (paint walls, free space, unknown; original kept as <name>.orig.pgm)
+          and its no-go zones (<name>.keepout.pgm/.yaml: Nav2's keepout filter mask, see navigation.launch.py).
 Saved maps: named saves, a list with thumbnails, navigate on / delete (files in map_dir, run by nav_manager).
 Goals go to Nav2 as a NavigateToPose action, so the page sees accepted / distance left / reached / failed.
 Calibration results are applied live to pico_bridge and written to drive.yaml.
@@ -30,17 +32,19 @@ import re
 import subprocess
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import cv2
 import numpy as np
 import rclpy
 import serial
+import yaml
 from ament_index_python.packages import get_package_share_directory
 from action_msgs.msg import GoalStatus
 from nav2_msgs.action import NavigateToPose
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
-from nav_msgs.msg import OccupancyGrid, Odometry
+from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
 from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy.action import ActionClient
@@ -49,19 +53,21 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.time import Time
-from sensor_msgs.msg import BatteryState, CompressedImage, Image, JointState, LaserScan
+from sensor_msgs.msg import (BatteryState, CompressedImage, Image, JointState, LaserScan, Range,
+                             RelativeHumidity, Temperature)
 from std_msgs.msg import Float64MultiArray, String
-from std_srvs.srv import Trigger
+from std_srvs.srv import SetBool, Trigger
 from tf2_ros import Buffer, TransformListener
 
 from robot_bringup.stereo_calib import NOVELTY, SIDES, StereoSession, find_corners, sample_params
 
 CALIB_PARAMS = ['wheel_radius', 'track_width', 'invert_left', 'invert_right', 'swap_sides']
-NAV_COMMANDS = ['start_mapping', 'start_exploring', 'save_map', 'start_navigation', 'stop']
+NAV_COMMANDS = ['start_mapping', 'start_exploring', 'save_map', 'start_navigation', 'stop', 'localize', 'find_myself', 'go_dock', 'check_dock', 'continue_mapping']
 MAP_NAME_RE = re.compile(r'^[A-Za-z0-9_-]{1,40}$')  # same rule as nav_manager
 MAX_V, MAX_W = 0.4, 1.5
 STACK_UNIT = 'robot.service'
 CAMERAS = ['left', 'right', 'depth']
+SCAN_MAX_RANGE = 6.0  # m; matches SLAM max_laser_range / AMCL laser_max_range
 CAMERA_TOPICS = {'left': '/left/preview/image/compressed', 'right': '/right/preview/image/compressed',
                  'depth': '/depth/preview/compressed'}  # depth: colour-coded, from stereo_depth.py
 STACK_ACTIONS = ['start', 'stop', 'restart']
@@ -83,6 +89,9 @@ def tcp_clients(port):
         except OSError:
             pass
     return count
+
+
+COSTMAP_TOPICS = {'global': '/global_costmap/costmap', 'local': '/local_costmap/costmap'}
 
 
 def yaw_of(q):
@@ -127,7 +136,12 @@ class WebUI(Node):
         # /scan on demand (see module docstring).
         self.scan_sub, self.scan, self.scan_time, self.scan_wanted = None, None, 0.0, 0.0
 
+        # Nav2 costmaps on demand, same idea as /scan. layer -> {sub, msg, seq, time}
+        self.costmaps = {name: {'sub': None, 'msg': None, 'seq': 0, 'time': 0.0} for name in COSTMAP_TOPICS}
+        self.costmap_wanted = 0.0
+
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.manual_pub = self.create_publisher(Twist, '/cmd_vel_manual', 10)  # joystick; see drive_guard.py
         self.nav_action = ActionClient(self, NavigateToPose, '/navigate_to_pose', callback_group=group)
         self.goal = {'status': 'none', 'message': '', 'distance': None}
         self.goal_handle = None
@@ -136,11 +150,28 @@ class WebUI(Node):
         self.create_subscription(String, '/robot/nav_map', lambda m: setattr(self, 'nav_map', m.data), latched)
         self.guard = ''
         self.explore = ''
+        self.localize = ''
+        self.dock = ''
+        # Nav2's planned route (map frame), drawn on the map while a goal is active.
+        self.plan, self.plan_time = [], 0.0
+        self.create_subscription(Path, '/plan', self.on_plan, 10)
+        self.dock_cache = (None, 0.0, None)  # (path, mtime, pose) of maps/<map>.dock.json
+        self.create_subscription(String, '/dock/status', lambda m: setattr(self, 'dock', m.data), latched)
+        self.create_subscription(String, '/robot/localize_status', lambda m: setattr(self, 'localize', m.data), latched)
         self.battery, self.battery_time, self.battery_status = None, 0.0, ''
         self.create_subscription(BatteryState, '/battery', self.on_battery, 10)
         self.create_subscription(String, '/battery/status', lambda m: setattr(self, 'battery_status', m.data), latched)
         self.create_subscription(String, '/explore/status', lambda m: setattr(self, 'explore', m.data), latched)
         self.create_subscription(String, '/drive_guard/status', lambda m: setattr(self, 'guard', m.data), latched)
+        # Sensor + LED Pico (pico_io.py): lights status, front range, temperature/humidity.
+        self.lights, self.lights_time = {}, 0.0
+        self.create_subscription(String, '/lights/status', self.on_lights, latched)
+        self.headlights_pub = self.create_publisher(String, '/lights/headlights', 10)
+        self.io = {}  # name -> (value, monotonic time)
+        self.create_subscription(Range, '/range/front', lambda m: self.io_value('range', m.range), 10)
+        self.create_subscription(Temperature, '/temperature', lambda m: self.io_value('temp', m.temperature), 10)
+        self.create_subscription(RelativeHumidity, '/humidity',
+                                 lambda m: self.io_value('humidity', m.relative_humidity * 100.0), 10)
         self.thumbs = {}  # name -> (mtime, png bytes)
         self.pose_pub = self.create_publisher(PoseWithCovarianceStamped, '/initialpose', 10)
 
@@ -152,8 +183,10 @@ class WebUI(Node):
                                              callback_group=group)
         self.calib = {}
         self.nav_params = self.create_client(SetParameters, '/nav_manager/set_parameters', callback_group=group)
+        self.guard_override = self.create_client(SetBool, '/drive_guard/override', callback_group=group)
 
         # Manual / calibration motion: published only while fresh, so Nav2 is not fought.
+        self.motion_manual = False
         self.motion = (0.0, 0.0)
         self.motion_until = 0.0
         self.test = {'name': None, 'status': 'idle', 'message': '', 'result': None}
@@ -205,6 +238,31 @@ class WebUI(Node):
     def on_odom(self, msg):
         self.odom, self.odom_time = msg, time.monotonic()
 
+    def on_plan(self, msg):
+        pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
+        step = max(1, len(pts) // 200)  # plenty for a line on a web map
+        self.plan = [[round(x, 3), round(y, 3)] for x, y in pts[::step] + pts[-1:]] if pts else []
+        self.plan_time = time.monotonic()
+
+    def dock_pose(self):
+        """Where the robot parks at the dock on the current map (dock.py saves it), or None."""
+        if self.mode in ('mapping', 'exploring'):
+            path = os.path.join(self.map_dir, '.pending_dock.json')  # seen during this mapping run
+        elif self.nav_map:
+            path = os.path.join(self.map_dir, self.nav_map + '.dock.json')
+        else:
+            return None
+        if not os.path.exists(path):
+            return None
+        mtime = os.path.getmtime(path)
+        if self.dock_cache[0] != path or self.dock_cache[1] != mtime:
+            try:
+                with open(path) as f:
+                    self.dock_cache = (path, mtime, json.load(f))
+            except (OSError, ValueError):
+                return None
+        return self.dock_cache[2]
+
     def on_battery(self, msg):
         self.battery, self.battery_time = msg, time.monotonic()
 
@@ -214,6 +272,32 @@ class WebUI(Node):
             return {'present': False, 'status': self.battery_status}
         return {'present': True, 'voltage': round(b.voltage, 2), 'percent': round(b.percentage * 100),
                 'status': self.battery_status}
+
+    def on_lights(self, msg):
+        try:
+            self.lights, self.lights_time = json.loads(msg.data), time.monotonic()
+        except ValueError:
+            pass
+
+    def io_value(self, name, value):
+        self.io[name] = (value, time.monotonic())
+
+    def io_payload(self):
+        out = dict(self.lights)
+        out['connected'] = bool(out.get('connected')) and time.monotonic() - self.lights_time < 5.0
+        for name, max_age in (('range', 1.0), ('temp', 6.0), ('humidity', 6.0)):
+            value, t = self.io.get(name, (None, 0.0))
+            fresh = value is not None and time.monotonic() - t < max_age
+            # JSON has no inf: the range reads 'clear' (null with fresh=True) when nothing is in view.
+            out[name] = round(value, 3) if fresh and math.isfinite(value) else None
+            out[name + '_ok'] = fresh
+        return out
+
+    def set_headlights(self, level):
+        if level not in ('off', 'dim', 'on'):
+            raise ValueError('headlights: off, dim or on')
+        self.headlights_pub.publish(String(data=level))
+        return {'ok': True}
 
     def on_wheels(self, msg):
         self.wheels, self.wheels_time = msg, time.monotonic()
@@ -240,6 +324,16 @@ class WebUI(Node):
         elif not wanted and self.scan_sub is not None:
             self.destroy_subscription(self.scan_sub)
             self.scan_sub, self.scan = None, None
+        cost_wanted = time.monotonic() - self.costmap_wanted < 8.0
+        for name, layer in self.costmaps.items():
+            if cost_wanted and layer['sub'] is None:
+                layer['sub'] = self.lazy_sub(
+                    OccupancyGrid, COSTMAP_TOPICS[name], lambda msg, layer=layer: self.on_costmap(layer, msg),
+                    QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                               reliability=ReliabilityPolicy.RELIABLE))
+            elif not cost_wanted and layer['sub'] is not None:
+                self.destroy_subscription(layer['sub'])
+                layer['sub'], layer['msg'] = None, None
         raw_wanted = time.monotonic() - self.raw_wanted < 10.0
         for side, raw in self.raw.items():
             if raw_wanted and raw['sub'] is None:
@@ -257,6 +351,9 @@ class WebUI(Node):
             elif not wanted and cam['sub'] is not None:
                 self.destroy_subscription(cam['sub'])
                 cam['sub'] = None
+
+    def on_costmap(self, layer, msg):
+        layer['msg'], layer['seq'], layer['time'] = msg, layer['seq'] + 1, time.monotonic()
 
     def on_raw(self, raw, msg):
         raw['got'] += 1
@@ -276,7 +373,7 @@ class WebUI(Node):
         handler.send_header('Cache-Control', 'no-store')
         handler.end_headers()
         seq, last_frame = cam['seq'], time.monotonic()
-        while time.monotonic() - last_frame < 10.0:  # ends if the camera stops; the page retries
+        while time.monotonic() - last_frame < 40.0:  # ends if the camera stops; the page retries. Starting takes ~20 s
             cam['wanted'] = time.monotonic()
             with cam['cond']:
                 cam['cond'].wait_for(lambda: cam['seq'] != seq, timeout=1.0)
@@ -294,13 +391,23 @@ class WebUI(Node):
         if time.monotonic() < self.motion_until:
             t = Twist()
             t.linear.x, t.angular.z = self.motion
-            self.cmd_pub.publish(t)
+            (self.manual_pub if self.motion_manual else self.cmd_pub).publish(t)
 
-    def drive(self, v, w, hold=0.3):
+    def set_guard_override(self, on):
+        if not self.guard_override.wait_for_service(timeout_sec=1.0):
+            raise RuntimeError('drive guard is not responding: restart the stack')
+        res = wait_future(self.guard_override.call_async(SetBool.Request(data=on)), 3.0)
+        if res is None:
+            raise RuntimeError('drive guard is not responding: restart the stack')
+        self.guard = res.message
+
+    def drive(self, v, w, hold=0.3, manual=False):
+        self.motion_manual = manual
         self.motion = (max(-MAX_V, min(MAX_V, v)), max(-MAX_W, min(MAX_W, w)))
         self.motion_until = time.monotonic() + hold
 
     def halt(self):
+        self.motion_manual = False
         self.motion = (0.0, 0.0)
         self.motion_until = time.monotonic() + 0.3  # a few explicit zeros
 
@@ -653,7 +760,12 @@ class WebUI(Node):
             'nav_map': self.nav_map,
             'guard': self.guard,
             'explore': self.explore,
+            'localize': self.localize,
+            'dock': self.dock,
+            'dock_pose': self.dock_pose(),
+            'plan': self.plan if time.monotonic() - self.plan_time < 3.0 and world == 'map' else [],
             'battery': self.battery_payload(),
+            'io': self.io_payload(),
             'localized': world == 'map',
             'goal': self.goal,
             'frame': world,
@@ -694,8 +806,33 @@ class WebUI(Node):
             'ok': True, 'frame': world,
             'laser': self.pose_in(world, s.header.frame_id),
             'angle_min': s.angle_min, 'angle_increment': s.angle_increment,
-            'ranges': [round(r, 3) if s.range_min <= r <= s.range_max else None for r in s.ranges],
+            'ranges': [round(r, 3) if s.range_min <= r <= min(s.range_max, SCAN_MAX_RANGE) else None for r in s.ranges],
         }
+
+    def costmap_payload(self, have):
+        """Costmap layers in the display frame. Cells only for layers newer than the page's copy
+        (have: layer -> seq), since the global one is large; the origin always, as odom drifts."""
+        self.costmap_wanted = time.monotonic()
+        world, layers = self.world_frame(), {}
+        for name, layer in self.costmaps.items():
+            m = layer['msg']
+            if m is None or time.monotonic() - layer['time'] > 5.0:
+                continue
+            at = self.pose_in(world, m.header.frame_id)
+            if at is None:
+                continue
+            o = m.info.origin
+            c, s = math.cos(at['yaw']), math.sin(at['yaw'])
+            out = {'seq': layer['seq'], 'width': m.info.width, 'height': m.info.height,
+                   'resolution': m.info.resolution,
+                   'origin': {'x': at['x'] + c * o.position.x - s * o.position.y,
+                              'y': at['y'] + s * o.position.x + c * o.position.y,
+                              'yaw': at['yaw'] + yaw_of(o.orientation)}}
+            if have.get(name) != layer['seq']:
+                # int8 cells (-1 unknown, 0 free, 1-98 inflation, 99 inscribed, 100 lethal) as raw bytes
+                out['data'] = base64.b64encode(bytes(m.data)).decode()
+            layers[name] = out
+        return {'frame': world, 'layers': layers}
 
     def wheels_payload(self):
         w = self.wheels
@@ -718,7 +855,10 @@ class WebUI(Node):
     def call_nav(self, command):
         client = self.nav_clients[command]
         if not client.wait_for_service(timeout_sec=1.0):
-            return {'success': False, 'message': 'nav_manager is not running'}
+            if self.nav_clients['stop'].service_is_ready():  # nav_manager is up, just not this service
+                return {'success': False, 'message': f'"{command}" is not available yet: restart the stack '
+                                                      '(Robot tab) to load the latest software'}
+            return {'success': False, 'message': 'nav_manager is not running (is the stack up?)'}
         self.halt()
         res = wait_future(client.call_async(Trigger.Request()), 45.0)
         if res is None:
@@ -776,6 +916,7 @@ class WebUI(Node):
             if name == 'latest' or not MAP_NAME_RE.match(name):
                 continue
             info = {'name': name, 'modified': os.path.getmtime(path),
+                    'can_continue': os.path.exists(os.path.join(self.map_dir, name + '.posegraph')),
                     'has_pose': os.path.exists(os.path.join(self.map_dir, name + '.pose.json'))}
             try:
                 with open(path) as f:
@@ -842,13 +983,140 @@ class WebUI(Node):
         self.set_nav_param('map_file', name)
         return self.call_nav('start_navigation')
 
+    # ---------- map editor (/mapedit) ----------
+    PGM = {'wall': 0, 'unknown': 205, 'free': 254}  # map_saver trinary values
+
+    def map_paths(self, name):
+        if not MAP_NAME_RE.match(name) or name == 'latest':
+            raise RuntimeError('unknown map')
+        base = os.path.join(self.map_dir, name)
+        if not os.path.exists(base + '.pgm'):
+            raise RuntimeError('no such map')
+        return base + '.pgm', base + '.yaml', base + '.orig.pgm'
+
+    def map_edit_info(self, name):
+        pgm, yml, orig = self.map_paths(name)
+        from PIL import Image
+        with Image.open(pgm) as im:
+            w, h = im.size
+        info = {'name': name, 'width': w, 'height': h, 'has_original': os.path.exists(orig),
+                'has_keepout': os.path.exists(self.keepout_paths(name)[1]),
+                'in_use': self.mode == 'navigating' and self.nav_map == name}
+        info.update(self.map_yaml_geometry(yml))
+        return info
+
+    @staticmethod
+    def map_yaml_geometry(yml):
+        with open(yml) as f:
+            doc = yaml.safe_load(f)
+        return {'resolution': float(doc['resolution']), 'origin': [float(v) for v in doc['origin'][:2]]}
+
+    def keepout_paths(self, name):
+        base = os.path.join(self.map_dir, name)
+        return base + '.keepout.pgm', base + '.keepout.yaml'
+
+    def map_edit_keepout_png(self, name):
+        """No-go mask on the map's own grid (white = no-go). The mask keeps the origin it was
+        saved with, so it stays put in the world when "Continue mapping" grows the map."""
+        pgm, yml, _ = self.map_paths(name)
+        kpgm, kyml = self.keepout_paths(name)
+        from PIL import Image
+        with Image.open(pgm) as im:
+            w, h = im.size
+        out = np.zeros((h, w), np.uint8)
+        if os.path.exists(kyml) and os.path.exists(kpgm):
+            g, kg = self.map_yaml_geometry(yml), self.map_yaml_geometry(kyml)
+            res = g['resolution']
+            with Image.open(kpgm) as km:
+                mask = np.array(km.convert('L')) < 128
+            kh, kw = mask.shape
+            # Image row 0 is the top (largest y) of each grid.
+            col = int(round((kg['origin'][0] - g['origin'][0]) / res))
+            row = int(round((g['origin'][1] + h * res - kg['origin'][1] - kh * res) / res))
+            r0, c0 = max(row, 0), max(col, 0)
+            r1, c1 = min(row + kh, h), min(col + kw, w)
+            if r1 > r0 and c1 > c0:
+                out[r0:r1, c0:c1][mask[r0 - row:r1 - row, c0 - col:c1 - col]] = 255
+        buf = io.BytesIO()
+        Image.fromarray(out).save(buf, 'PNG')
+        return buf.getvalue()
+
+    def map_edit_save_keepout(self, name, png_b64):
+        _, yml, _ = self.map_paths(name)
+        kpgm, kyml = self.keepout_paths(name)
+        from PIL import Image
+        with Image.open(io.BytesIO(base64.b64decode(png_b64))) as im:
+            nogo = np.array(im.convert('L')) > 127
+        if not nogo.any():
+            for path in (kpgm, kyml):
+                if os.path.exists(path):
+                    os.remove(path)
+            return 0
+        # map_server trinary: black = occupied (100) = keepout, white = free.
+        Image.fromarray(np.where(nogo, 0, 254).astype(np.uint8)).save(kpgm)
+        g = self.map_yaml_geometry(yml)
+        with open(kyml, 'w') as f:
+            f.write(f'image: {os.path.basename(kpgm)}\nmode: trinary\nresolution: {g["resolution"]}\n'
+                    f'origin: [{g["origin"][0]}, {g["origin"][1]}, 0]\nnegate: 0\n'
+                    'occupied_thresh: 0.65\nfree_thresh: 0.25\n')
+        return int(nogo.sum())
+
+    def map_edit_png(self, name):
+        pgm = self.map_paths(name)[0]
+        from PIL import Image
+        with Image.open(pgm) as im:
+            buf = io.BytesIO()
+            im.convert('L').save(buf, 'PNG')
+        return buf.getvalue()
+
+    def map_edit_save(self, name, png_b64, keepout_b64=None):
+        pgm, _, orig = self.map_paths(name)
+        from PIL import Image
+        import numpy as np_
+        with Image.open(io.BytesIO(base64.b64decode(png_b64))) as im:
+            a = np_.array(im.convert('L'))
+        with Image.open(pgm) as old:
+            if a.shape != (old.size[1], old.size[0]):
+                raise RuntimeError('edited image has the wrong size')
+        # Snap to the three values map_server reads (browser canvases can blend edges).
+        out = np_.full(a.shape, self.PGM['unknown'], np_.uint8)
+        out[a < 100] = self.PGM['wall']
+        out[a > 230] = self.PGM['free']
+        if not os.path.exists(orig):
+            import shutil
+            shutil.copy2(pgm, orig)  # first edit: keep what SLAM made
+        Image.fromarray(out).save(pgm)
+        self.thumbs.pop(name, None)
+        zones = ''
+        if keepout_b64 is not None:
+            cells = self.map_edit_save_keepout(name, keepout_b64)
+            res = self.map_yaml_geometry(self.map_paths(name)[1])['resolution']
+            zones = f' No-go zones: {cells * res * res:.1f} m².' if cells else ' No no-go zones.'
+        note = ' Navigation is using this map: restart it to load the edits.' if self.nav_map == name and self.mode == 'navigating' else ''
+        return {'success': True, 'message': f'saved "{name}" (original kept).{zones}{note}'}
+
+    def map_edit_revert(self, name):
+        pgm, _, orig = self.map_paths(name)
+        if not os.path.exists(orig):
+            raise RuntimeError('this map has no saved original')
+        os.replace(orig, pgm)
+        self.thumbs.pop(name, None)
+        return {'success': True, 'message': f'"{name}" is back to the original SLAM map'}
+
+    def continue_map(self, name):
+        if not MAP_NAME_RE.match(name):
+            raise RuntimeError('unknown map')
+        self.set_nav_param('map_file', name)
+        return self.call_nav('continue_mapping')
+
     def delete_map(self, name):
         if not MAP_NAME_RE.match(name) or name == 'latest':
             raise RuntimeError('unknown map')
         if self.mode == 'navigating' and self.nav_map == name:
             raise RuntimeError('stop navigating on this map first')
         removed = 0
-        for ext in ('.yaml', '.pgm', '.pose.json'):
+        for ext in ('.yaml', '.pgm', '.pose.json', '.orig.pgm', '.dock.json', '.posegraph', '.data',
+                    '.keepout.pgm', '.keepout.yaml'):
             path = os.path.join(self.map_dir, name + ext)
             if os.path.exists(path):
                 os.remove(path)
@@ -906,8 +1174,9 @@ def make_handler(node, web_dir):
         def do_GET(self):
             node.touch('web page open')
             path = self.path.split('?')[0]
-            if path in ('/', '/index.html', '/encoders', '/calibrate'):
-                page = {'/encoders': 'encoders.html', '/calibrate': 'calibrate.html'}.get(path, 'index.html')
+            if path in ('/', '/index.html', '/encoders', '/calibrate', '/mapedit'):
+                page = {'/encoders': 'encoders.html', '/calibrate': 'calibrate.html',
+                        '/mapedit': 'mapedit.html'}.get(path, 'index.html')
                 with open(os.path.join(web_dir, page), 'rb') as f:
                     self.send(200, f.read(), 'text/html; charset=utf-8')
             elif path == '/api/wheels':
@@ -921,6 +1190,17 @@ def make_handler(node, web_dir):
                 self.send(200, jpg, 'image/jpeg') if jpg else self.send(404, {'error': 'calibrate first'})
             elif path == '/api/maps':
                 self.send(200, {'maps': node.list_maps()})
+            elif path.startswith('/api/mapedit/') and path.endswith(('.png', '.json')):
+                name = path[len('/api/mapedit/'):].rsplit('.', 1)[0]
+                try:
+                    if name.endswith('.keepout') and path.endswith('.png'):
+                        self.send(200, node.map_edit_keepout_png(name[:-len('.keepout')]), 'image/png')
+                    elif path.endswith('.png'):
+                        self.send(200, node.map_edit_png(name), 'image/png')
+                    else:
+                        self.send(200, node.map_edit_info(name))
+                except RuntimeError as e:
+                    self.send(404, {'error': str(e)})
             elif path.startswith('/api/maps/') and path.endswith('.png'):
                 png = node.map_thumb(path[len('/api/maps/'):-4])
                 self.send(200, png, 'image/png') if png else self.send(404, {'error': 'no such map'})
@@ -931,6 +1211,9 @@ def make_handler(node, web_dir):
                 self.send(200, body) if body else self.send(404, {'error': 'no map'})
             elif path == '/api/scan':
                 self.send(200, node.scan_payload())
+            elif path == '/api/costmap':
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                self.send(200, node.costmap_payload({k: int(v[0]) for k, v in query.items() if v[0].isdigit()}))
             elif path.startswith('/stream/') and path[8:] in CAMERAS:
                 node.stream(self, path[8:])
             elif path == '/api/calib':
@@ -947,7 +1230,10 @@ def make_handler(node, web_dir):
                 path = self.path.split('?')[0]
                 if path == '/api/drive':
                     node.test_abort.set()
-                    node.drive(float(body.get('v', 0)), float(body.get('w', 0)))
+                    node.drive(float(body.get('v', 0)), float(body.get('w', 0)), manual=True)
+                    self.send(200, {'ok': True})
+                elif path == '/api/guard/override':
+                    node.set_guard_override(bool(body.get('on')))
                     self.send(200, {'ok': True})
                 elif path == '/api/wheels':
                     node.drive_wheels(body.get('left', 0), body.get('right', 0))
@@ -998,6 +1284,14 @@ def make_handler(node, web_dir):
                     self.send(200, node.save_map(str(body.get('name', ''))))
                 elif path == '/api/maps/navigate':
                     self.send(200, node.navigate_map(str(body.get('name', ''))))
+                elif path == '/api/mapedit/save':
+                    keepout = body.get('keepout')
+                    self.send(200, node.map_edit_save(str(body['name']), str(body['png']),
+                                                      None if keepout is None else str(keepout)))
+                elif path == '/api/mapedit/revert':
+                    self.send(200, node.map_edit_revert(str(body['name'])))
+                elif path == '/api/maps/continue':
+                    self.send(200, node.continue_map(str(body.get('name', ''))))
                 elif path == '/api/maps/delete':
                     self.send(200, node.delete_map(str(body.get('name', ''))))
                 elif path.startswith('/api/stack/') and path[11:] in STACK_ACTIONS:
@@ -1007,6 +1301,8 @@ def make_handler(node, web_dir):
                     self.send(200, {'ok': True})
                 elif path == '/api/calib':
                     self.send(200, node.apply_calib(body))
+                elif path == '/api/lights':
+                    self.send(200, node.set_headlights(body.get('headlights')))
                 else:
                     self.send(404, {'error': 'not found'})
             except Exception as e:

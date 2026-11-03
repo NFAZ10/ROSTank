@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Map Editor</title>
+<style>
+/* Same tokens as index.html. Map colours are the map's own data (wall / free / unknown). */
+:root {
+  --bg: #f3f4f1; --panel: #ffffff; --ink: #1d2320; --muted: #66706a; --line: #dde1dc;
+  --accent: #1f7a5a; --accent-ink: #ffffff; --danger: #c2372b; --goal: #2f6fd6; --grid: rgba(47,111,214,.25);
+  --nogo: #d62f2f;
+  --radius: 10px; --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121614; --panel: #1b201d; --ink: #e6ebe7; --muted: #95a09a; --line: #2c332f;
+    --accent: #3fb58a; --accent-ink: #08130e; --danger: #ef6b5e; --goal: #6ea2ff; --grid: rgba(110,162,255,.3);
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.4 var(--font); }
+body { display: flex; flex-direction: column; }
+header, .tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 8px 16px;
+  background: var(--panel); border-bottom: 1px solid var(--line); }
+header h1 { font-size: 17px; margin: 0 6px 0 0; }
+header a { color: var(--muted); text-decoration: none; font-size: 14px; }
+header a:hover { color: var(--ink); }
+.spacer { flex: 1; }
+select, button { font: inherit; font-size: 14px; color: var(--ink); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 8px; padding: 7px 11px; }
+button { font-weight: 600; cursor: pointer; touch-action: manipulation; }
+button:hover { border-color: var(--muted); }
+button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+button.danger { color: var(--danger); }
+.tools button[aria-pressed="true"] { background: var(--goal); color: #fff; border-color: var(--goal); }
+.swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; border: 1px solid var(--muted);
+  vertical-align: -1px; margin-right: 6px; }
+label.size { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+label.size input { accent-color: var(--accent); width: 110px; }
+.stage { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.msg { font-size: 13px; color: var(--muted); }
+.msg.err { color: var(--danger); }
+.hint { position: absolute; left: 12px; bottom: 10px; font-size: 12.5px; color: var(--muted);
+  text-shadow: 0 0 4px var(--bg); pointer-events: none; }
+.zoom { position: absolute; right: 12px; top: 12px; display: flex; flex-direction: column; gap: 6px; }
+.zoom button { width: 38px; padding: 6px 0; background: var(--panel); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Map editor</h1>
+  <a href="/">← Control page</a>
+  <select id="mapSel" aria-label="Map to edit"></select>
+  <span class="spacer"></span>
+  <span class="msg" id="msg"></span>
+  <button id="undo" disabled title="Ctrl+Z">Undo</button>
+  <button id="revert" class="danger" title="Throw away all edits and go back to the map SLAM made">Revert to original</button>
+  <button id="save" class="primary" disabled>Save</button>
+</header>
+<div class="tools" role="toolbar" aria-label="Tools">
+  <button data-tool="pan" aria-pressed="true">Pan</button>
+  <button data-tool="wall"><span class="swatch" style="background:#000"></span>Wall</button>
+  <button data-tool="free"><span class="swatch" style="background:#fefefe"></span>Free</button>
+  <button data-tool="unknown"><span class="swatch" style="background:#cdcdcd"></span>Unknown</button>
+  <button data-tool="line" title="Click and drag: a straight wall">Line (wall)</button>
+  <button data-tool="nogo" title="Drag a box: navigation never plans into it (the map itself is unchanged)"><span class="swatch" style="background:var(--nogo);opacity:.6"></span>No-go zone</button>
+  <button data-tool="nogoErase" title="Brush: removes no-go zone where you paint">Erase no-go</button>
+  <label class="size">Brush <input type="range" id="brush" min="1" max="8" value="2"> <span id="brushVal">10 cm</span></label>
+</div>
+<div class="stage">
+  <canvas id="cv"></canvas>
+  <div class="zoom"><button id="zin" aria-label="Zoom in">+</button><button id="zout" aria-label="Zoom out">−</button><button id="fit" aria-label="Fit map">⤢</button></div>
+  <div class="hint" id="hint"></div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const VALUE = { wall: 0, free: 254, unknown: 205 };   // = map_saver trinary values
+async function api(path, body) {
+  const opts = body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+  const r = await fetch(path, opts); const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+function note(text, err) { $('msg').textContent = text; $('msg').classList.toggle('err', !!err); }
+
+const cv = $('cv'), ctx = cv.getContext('2d');
+const off = document.createElement('canvas'), octx = off.getContext('2d', { willReadFrequently: true });
+// No-go layer, same grid as the map: opaque pixel = no-go. Saved separately as <map>.keepout.pgm.
+const ko = document.createElement('canvas'), kctx = ko.getContext('2d', { willReadFrequently: true });
+const NOGO_ALPHA = 0.45;
+let info = null, view = { s: 4, x: 0, y: 0 }, tool = 'pan', undo = [], dirty = false, drag = null;
+
+// ---------------- loading ----------------
+async function loadList() {
+  const { maps } = await api('/api/maps');
+  $('mapSel').innerHTML = maps.map((m) => `<option value="${m.name}">${m.name}</option>`).join('');
+  const want = new URLSearchParams(location.search).get('map');
+  if (want && maps.some((m) => m.name === want)) $('mapSel').value = want;
+  if (maps.length) load($('mapSel').value); else note('No saved maps yet.', true);
+}
+const loadImage = (src) => new Promise((ok, fail) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => fail(new Error('could not load ' + src)); i.src = src; });
+async function load(name) {
+  try {
+    info = await api(`/api/mapedit/${encodeURIComponent(name)}.json`);
+    const t = Date.now(), base = `/api/mapedit/${encodeURIComponent(name)}`;
+    const [img, mask] = await Promise.all([loadImage(`${base}.png?t=${t}`), loadImage(`${base}.keepout.png?t=${t}`)]);
+    off.width = ko.width = info.width; off.height = ko.height = info.height;
+    octx.drawImage(img, 0, 0);
+    // Mask comes as white-on-black; keep it as solid no-go colour on transparent.
+    kctx.drawImage(mask, 0, 0);
+    const k = kctx.getImageData(0, 0, ko.width, ko.height), [r, g, b] = nogoRGB();
+    for (let i = 0; i < k.data.length; i += 4) {
+      const on = k.data[i] > 127;
+      k.data[i] = r; k.data[i + 1] = g; k.data[i + 2] = b; k.data[i + 3] = on ? 255 : 0;
+    }
+    kctx.putImageData(k, 0, 0);
+    undo = []; dirty = false; refresh(); fit();
+    note(info.in_use ? 'Navigation is using this map: restart it after saving to load the edits.' : '');
+    history.replaceState(null, '', `?map=${encodeURIComponent(name)}`);
+  } catch (e) { note(e.message, true); }
+}
+function nogoRGB() {
+  const v = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--nogo').trim().slice(1), 16);
+  return [v >> 16 & 255, v >> 8 & 255, v & 255];
+}
+$('mapSel').onchange = (e) => {
+  if (dirty && !confirm('Discard unsaved edits?')) { e.target.value = info.name; return; }
+  load(e.target.value);
+};
+
+// ---------------- view ----------------
+function resize() { const r = cv.getBoundingClientRect(), d = devicePixelRatio || 1; cv.width = r.width * d; cv.height = r.height * d; }
+function fit() {
+  if (!info) return;
+  const r = cv.getBoundingClientRect();
+  view.s = Math.max(0.5, Math.min(r.width / info.width, r.height / info.height) * 0.95);
+  view.x = (r.width - info.width * view.s) / 2; view.y = (r.height - info.height * view.s) / 2;
+}
+function toCell(e) { const r = cv.getBoundingClientRect(); return { x: (e.clientX - r.left - view.x) / view.s, y: (e.clientY - r.top - view.y) / view.s }; }
+function zoom(f, cx, cy) {
+  const r = cv.getBoundingClientRect(); cx ??= r.width / 2; cy ??= r.height / 2;
+  const ns = Math.max(0.5, Math.min(60, view.s * f));
+  view.x = cx - (cx - view.x) * ns / view.s; view.y = cy - (cy - view.y) * ns / view.s; view.s = ns;
+}
+function draw() {
+  const d = devicePixelRatio || 1, W = cv.width / d, H = cv.height / d;
+  ctx.setTransform(d, 0, 0, d, 0, 0);
+  ctx.fillStyle = getComputedStyle(document.body).backgroundColor; ctx.fillRect(0, 0, W, H);
+  if (info) {
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(off, view.x, view.y, info.width * view.s, info.height * view.s);
+    ctx.globalAlpha = NOGO_ALPHA;
+    ctx.drawImage(ko, view.x, view.y, info.width * view.s, info.height * view.s);
+    ctx.globalAlpha = 1;
+    // 1 m grid
+    const step = 1 / info.resolution;
+    ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--grid'); ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let c = 0; c <= info.width; c += step) { const x = view.x + c * view.s; ctx.moveTo(x, view.y); ctx.lineTo(x, view.y + info.height * view.s); }
+    for (let c = 0; c <= info.height; c += step) { const y = view.y + c * view.s; ctx.moveTo(view.x, y); ctx.lineTo(view.x + info.width * view.s, y); }
+    ctx.stroke();
+    if (drag && drag.line) {  // line preview
+      ctx.strokeStyle = '#2f6fd6'; ctx.lineWidth = Math.max(2, brush() * view.s); ctx.lineCap = 'square';
+      ctx.beginPath(); ctx.moveTo(view.x + drag.a.x * view.s, view.y + drag.a.y * view.s);
+      ctx.lineTo(view.x + drag.b.x * view.s, view.y + drag.b.y * view.s); ctx.stroke();
+    }
+    if (drag && drag.box) {  // no-go box preview, snapped to cells
+      const c = boxCells(drag.a, drag.b), nogo = getComputedStyle(document.documentElement).getPropertyValue('--nogo');
+      ctx.fillStyle = nogo; ctx.globalAlpha = NOGO_ALPHA;
+      ctx.fillRect(view.x + c.x * view.s, view.y + c.y * view.s, c.w * view.s, c.h * view.s);
+      ctx.globalAlpha = 1; ctx.strokeStyle = nogo; ctx.lineWidth = 2;
+      ctx.strokeRect(view.x + c.x * view.s, view.y + c.y * view.s, c.w * view.s, c.h * view.s);
+      if (info) {
+        ctx.font = '600 12px system-ui, sans-serif'; ctx.fillStyle = nogo;
+        ctx.fillText(`${(c.w * info.resolution).toFixed(2)} × ${(c.h * info.resolution).toFixed(2)} m`,
+          view.x + c.x * view.s, view.y + c.y * view.s - 6);
+      }
+    }
+  }
+  requestAnimationFrame(draw);
+}
+
+// ---------------- editing ----------------
+const brush = () => +$('brush').value;
+$('brush').oninput = () => { $('brushVal').textContent = `${Math.round(brush() * (info ? info.resolution : 0.05) * 100)} cm`; };
+function color(t) { const v = VALUE[t === 'line' ? 'wall' : t]; return `rgb(${v},${v},${v})`; }
+function stamp(p, t) {
+  const b = brush(), x = Math.floor(p.x - (b - 1) / 2), y = Math.floor(p.y - (b - 1) / 2);
+  if (t === 'nogoErase') { kctx.clearRect(x, y, b, b); return; }
+  octx.fillStyle = color(t); octx.fillRect(x, y, b, b);
+}
+function boxCells(a, b) {
+  const x0 = Math.max(0, Math.floor(Math.min(a.x, b.x))), y0 = Math.max(0, Math.floor(Math.min(a.y, b.y)));
+  const x1 = Math.min(info.width, Math.floor(Math.max(a.x, b.x)) + 1), y1 = Math.min(info.height, Math.floor(Math.max(a.y, b.y)) + 1);
+  return { x: x0, y: y0, w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0) };
+}
+function fillNogo(c) {
+  const [r, g, b] = nogoRGB();
+  kctx.fillStyle = `rgb(${r},${g},${b})`; kctx.fillRect(c.x, c.y, c.w, c.h);
+}
+function stroke(a, b, t) {  // stamp every cell along a -> b
+  const n = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y)));
+  for (let i = 0; i <= n; i++) stamp({ x: a.x + (b.x - a.x) * i / n, y: a.y + (b.y - a.y) * i / n }, t);
+}
+function checkpoint() {
+  undo.push({ map: octx.getImageData(0, 0, off.width, off.height), nogo: kctx.getImageData(0, 0, ko.width, ko.height) });
+  if (undo.length > 40) undo.shift();
+  dirty = true; refresh();
+}
+function refresh() {
+  $('undo').disabled = !undo.length; $('save').disabled = !dirty;
+  $('revert').disabled = !info || !info.has_original;
+  $('hint').textContent = {
+    pan: 'Drag to move, wheel or +/− to zoom. Grid squares are 1 m.',
+    wall: 'Paint walls: the robot treats black as solid.',
+    free: 'Paint free space: erases junk the robot should drive through.',
+    unknown: 'Paint unknown (grey): for areas you don’t want in the map.',
+    line: 'Drag from one end of a wall to the other.',
+    nogo: 'Drag a box the robot must never drive into. Navigation plans around it; the map itself is unchanged.',
+    nogoErase: 'Paint over a no-go zone to remove it.',
+  }[tool] + (dirty ? '  ·  Unsaved changes' : '');
+}
+document.querySelectorAll('[data-tool]').forEach((b) => b.onclick = () => {
+  tool = b.dataset.tool;
+  document.querySelectorAll('[data-tool]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+  refresh();
+});
+
+cv.addEventListener('pointerdown', (e) => {
+  if (!info) return;
+  cv.setPointerCapture(e.pointerId);
+  const p = toCell(e);
+  if (tool === 'pan' || e.button === 1) drag = { pan: true, sx: e.clientX, sy: e.clientY, vx: view.x, vy: view.y };
+  else if (tool === 'line') drag = { line: true, a: p, b: p };
+  else if (tool === 'nogo') drag = { box: true, a: p, b: p };
+  else { checkpoint(); stamp(p, tool); drag = { paint: true, last: p }; }
+});
+cv.addEventListener('pointermove', (e) => {
+  if (!drag) return;
+  if (drag.pan) { view.x = drag.vx + e.clientX - drag.sx; view.y = drag.vy + e.clientY - drag.sy; }
+  else if (drag.line || drag.box) drag.b = toCell(e);
+  else { const p = toCell(e); stroke(drag.last, p, tool); drag.last = p; }
+});
+cv.addEventListener('pointerup', () => {
+  if (drag && drag.line) { checkpoint(); stroke(drag.a, drag.b, 'wall'); }
+  if (drag && drag.box) { const c = boxCells(drag.a, drag.b); if (c.w && c.h) { checkpoint(); fillNogo(c); } }
+  drag = null;
+});
+cv.addEventListener('wheel', (e) => {
+  e.preventDefault(); const r = cv.getBoundingClientRect();
+  zoom(e.deltaY < 0 ? 1.2 : 1 / 1.2, e.clientX - r.left, e.clientY - r.top);
+}, { passive: false });
+$('zin').onclick = () => zoom(1.3); $('zout').onclick = () => zoom(1 / 1.3); $('fit').onclick = fit;
+
+function doUndo() {
+  if (!undo.length) return;
+  const u = undo.pop(); octx.putImageData(u.map, 0, 0); kctx.putImageData(u.nogo, 0, 0);
+  dirty = true; refresh();
+}
+function nogoPNG() {  // white = no-go, black = not, for the server
+  const k = kctx.getImageData(0, 0, ko.width, ko.height), c = document.createElement('canvas');
+  c.width = ko.width; c.height = ko.height;
+  const cc = c.getContext('2d'), out = cc.createImageData(c.width, c.height);
+  for (let i = 0; i < k.data.length; i += 4) {
+    const v = k.data[i + 3] > 127 ? 255 : 0;
+    out.data[i] = out.data[i + 1] = out.data[i + 2] = v; out.data[i + 3] = 255;
+  }
+  cc.putImageData(out, 0, 0);
+  return c.toDataURL('image/png').split(',')[1];
+}
+$('undo').onclick = doUndo;
+document.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); doUndo(); } });
+
+$('save').onclick = async () => {
+  $('save').disabled = true; note('Saving…');
+  try {
+    const png = off.toDataURL('image/png').split(',')[1];
+    const r = await api('/api/mapedit/save', { name: info.name, png, keepout: nogoPNG() });
+    dirty = false; info.has_original = true; note(r.message);
+  } catch (e) { note(e.message, true); }
+  refresh();
+};
+$('revert').onclick = async (e) => {
+  const b = e.currentTarget;
+  if (!b.dataset.armed) {
+    b.dataset.armed = '1'; b.textContent = 'Confirm revert';
+    setTimeout(() => { delete b.dataset.armed; b.textContent = 'Revert to original'; }, 3000);
+    return;
+  }
+  try { const r = await api('/api/mapedit/revert', { name: info.name }); await load(info.name); note(r.message); }
+  catch (err) { note(err.message, true); }
+};
+window.addEventListener('beforeunload', (e) => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
+window.addEventListener('resize', resize);
+
+resize(); refresh(); requestAnimationFrame(draw); loadList();
+</script>
+</body>
+</html>

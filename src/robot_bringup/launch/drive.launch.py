@@ -17,6 +17,15 @@ def generate_launch_description():
             remappings=[('odom', 'wheel/odom'), ('cmd_vel', 'cmd_vel_safe')],
             output='screen',
         ),
+        # Sensor + LED Pico: front range, temperature/humidity, headlights / tail / top lights.
+        Node(
+            package='robot_bringup',
+            executable='pico_io',
+            parameters=[os.path.join(share, 'config', 'pico_io.yaml')],
+            output='screen',
+        ),
+        # APM flight controller as an IMU, read only. Waits quietly if it isn't plugged in.
+        Node(package='robot_bringup', executable='apm_imu', output='screen'),
         # Low-battery warning and clean power-off before the packs go flat (reads /battery).
         Node(package='robot_bringup', executable='battery_guard', output='screen'),
         # Every /cmd_vel (web UI, CLI, teleop, Nav2) -> obstacle check -> /cmd_vel_safe -> pico_bridge.
@@ -43,6 +52,18 @@ def generate_launch_description():
                 'frame_id': 'laser',
                 'angle_compensate': True,
             }],
+            # Raw scans; the filter chain below cleans them and publishes /scan.
+            remappings=[('scan', 'scan_raw')],
+            output='screen',
+        ),
+        # /scan_raw -> shadow (edge veil) + 6 m range filters -> /scan (config/scan_filter.yaml).
+        Node(
+            package='laser_filters',
+            executable='scan_to_scan_filter_chain',
+            parameters=[os.path.join(share, 'config', 'scan_filter.yaml')],
+            remappings=[('scan', 'scan_raw'), ('scan_filtered', 'scan')],
+            respawn=True,
+            respawn_delay=3.0,
             output='screen',
         ),
         # Motor spins only while something consumes /scan (see lidar_standby.py).

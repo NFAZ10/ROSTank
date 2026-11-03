@@ -19,7 +19,7 @@ amcl:
     global_frame_id: map
     lambda_short: 0.1
     laser_likelihood_max_dist: 2.0
-    laser_max_range: 12.0
+    laser_max_range: 6.0
     laser_min_range: 0.15
     laser_model_type: likelihood_field
     max_beams: 120
@@ -28,8 +28,10 @@ amcl:
     odom_frame_id: odom
     pf_err: 0.05
     pf_z: 0.99
-    recovery_alpha_fast: 0.0
-    recovery_alpha_slow: 0.0
+    # Recovery: when the scan keeps matching the map worse than it used to, AMCL scatters fresh
+    # guesses around the map instead of staying confidently wrong (Nav2's suggested values).
+    recovery_alpha_fast: 0.1
+    recovery_alpha_slow: 0.001
     resample_interval: 1
     robot_model_type: nav2_amcl::DifferentialMotionModel
     save_pose_rate: 0.5
@@ -168,8 +170,9 @@ local_costmap:
       - inflation_layer
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        cost_scaling_factor: 4.0
-        inflation_radius: 0.35
+        # Keep-away zone: the robot's corners reach 0.20 m from its centre, so keep the radius above that.
+        cost_scaling_factor: 8.0
+        inflation_radius: 0.25
       static_layer:
         plugin: nav2_costmap_2d::StaticLayer
         map_subscribe_transient_local: true
@@ -189,21 +192,19 @@ local_costmap:
           obstacle_min_range: 0.15
           raytrace_max_range: 6.0
           raytrace_min_range: 0.0
-        # Stereo depth (robot_bringup/stereo_depth.py): sees what the lidar's 18 cm plane
-        # misses. Only 10-50 cm above the floor: the cameras are 7 cm up, and a bad depth
-        # reading on the floor always lands below camera height, so above 10 cm is real.
-        # Out to 1.8 m only, where stereo is accurate.
+        # Stereo depth (robot_bringup/stereo_depth.py): sees what the lidar's plane misses.
+        # Already height-filtered and confirmed over several frames, in base_link at z = 0.15.
+        # Marking only: the cloud is sparse cells, so it says nothing about the space between.
         depth:
-          topic: /depth/points
+          topic: /depth/obstacles
           data_type: PointCloud2
           marking: true
-          clearing: true
-          min_obstacle_height: 0.10
+          clearing: false
+          min_obstacle_height: 0.0
           max_obstacle_height: 0.5
-          obstacle_min_range: 0.45
-          obstacle_max_range: 1.8
-          raytrace_min_range: 0.45
-          raytrace_max_range: 2.5
+          obstacle_min_range: 0.0
+          obstacle_max_range: 2.0
+          observation_persistence: 1.0   # stereo stops -> its marks go, instead of staying for good
           expected_update_rate: 0.0
 global_costmap:
   global_costmap:
@@ -222,7 +223,7 @@ global_costmap:
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
-        observation_sources: scan
+        observation_sources: scan depth   # depth too, so plans route around it (see local_costmap)
         scan:
           topic: /scan
           data_type: LaserScan
@@ -233,13 +234,25 @@ global_costmap:
           obstacle_min_range: 0.15
           raytrace_max_range: 6.0
           raytrace_min_range: 0.0
+        depth:
+          topic: /depth/obstacles
+          data_type: PointCloud2
+          marking: true
+          clearing: false
+          min_obstacle_height: 0.0
+          max_obstacle_height: 0.5
+          obstacle_min_range: 0.0
+          obstacle_max_range: 2.0
+          observation_persistence: 1.0   # stereo stops -> its marks go, instead of staying for good
+          expected_update_rate: 0.0
       static_layer:
         plugin: nav2_costmap_2d::StaticLayer
         map_subscribe_transient_local: true
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        cost_scaling_factor: 4.0
-        inflation_radius: 0.35
+        # Keep-away zone: the robot's corners reach 0.20 m from its centre, so keep the radius above that.
+        cost_scaling_factor: 8.0
+        inflation_radius: 0.25
       always_send_full_costmap: true
       footprint: '[[0.16, 0.125], [0.16, -0.125], [-0.16, -0.125], [-0.16, 0.125]]'
 map_server:

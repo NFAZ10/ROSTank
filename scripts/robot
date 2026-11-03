@@ -25,7 +25,8 @@ $(bold "System")
   robot logs [drive|nav|cameras|web]   follow the logs (Ctrl-C to quit)
   robot power                   Jetson power mode and current board power
   robot build                   rebuild the ROS workspace
-  robot flash                   rebuild + flash the Pico drive firmware (stops the stack meanwhile)
+  robot flash [drive|io]        rebuild + flash Pico firmware: drive board (default) or the
+                                sensor/LED board (stops the stack meanwhile)
   robot sim [explore]           simulated robot in a test room (Gazebo, separate from the real one);
                                 windows open in a remote-desktop session, Foxglove ws://<ip>:8766 always
 
@@ -34,11 +35,13 @@ $(bold "Driving")              (lift the robot or clear the floor first)
   robot move <metres> [m/s]     drive straight a set distance (negative = backwards)
   robot turn <degrees> [rad/s]  turn on the spot (positive = left)
   robot stop-motors             stop now and cancel any navigation goal
+  robot guard off | on          obstacle protection for manual driving (off: slow, ends after 20 s idle)
   robot wheels                  live track encoder counts and speeds
 
 $(bold "Mapping and navigation")
   robot map start               start mapping (SLAM): drive around with robot drive
   robot map explore             map on its own until nothing is left, then come back (then save)
+  robot map continue <name>     keep mapping a saved map (start near where the robot last was on it)
   robot map save <name>         save the map being made
   robot map list                saved maps
   robot map nav [name]          navigate on a saved map (default: the latest)
@@ -47,6 +50,10 @@ $(bold "Mapping and navigation")
   robot pose <x> <y> [deg]      tell navigation where the robot is on the map
   robot goal <x> <y> [deg]      drive to a point on the map (Ctrl-C cancels)
   robot where                   where the robot is (map frame if navigating)
+  robot dock                    find the dock's AprilTag and drive up to it (while mapping/navigating)
+  robot dock check              look (no driving) for the tag and remember the dock for this map
+  robot localize                after a pose guess: turn until the lidar matches the map
+  robot findme                  work out where it is on the whole map from scratch (turns on the spot)
 
 $(bold "Calibration and cameras")
   robot calib [show]            drive calibration values
@@ -105,7 +112,7 @@ case "$cmd" in
   flash)
     was_up=0; stack_active && was_up=1
     [ $was_up = 1 ] && { echo "stopping the stack (it holds the Pico's port)…"; sudo -n systemctl stop robot.service; sleep 2; }
-    "$WS/firmware/flash.sh"; rc=$?
+    "$WS/firmware/flash.sh" "${1:-drive}"; rc=$?
     [ $was_up = 1 ] && { echo "starting the stack…"; sudo -n systemctl start robot.service; }
     exit $rc ;;
 
@@ -113,12 +120,28 @@ case "$cmd" in
     need_stack
     echo "Driving: i forward, , backward, j/l turn left/right, u/o/m/. curves, k stop, q/z faster/slower, Ctrl-C quit."
     trap 'py stop >/dev/null 2>&1' EXIT
-    ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -p speed:=0.2 -p turn:=1.0 ;;
+    ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -p speed:=0.2 -p turn:=1.0 -r cmd_vel:=cmd_vel_manual ;;
 
-  move|turn|wheels|where|pose|goal|snap|depth|battery)
+  move|turn|wheels|where|pose|goal|snap|depth|battery|guard)
     need_stack; py "$cmd" "$@" ;;
   stop-motors)
     need_stack; py stop ;;
+  dock)
+    if [ "$1" = check ]; then msg=$(nav_call check_dock); else msg=$(nav_call go_dock); fi; echo "$msg"
+    case "$msg" in going*|checking*) ;; *) exit 1 ;; esac   # refused: nothing to follow
+    for _ in $(seq 60); do   # follow until it reports a result (up to ~2 min)
+      sleep 2
+      st=$(timeout 4 ros2 topic echo --once /dock/status 2>/dev/null | sed -n "s/^data: //p" | tr -d "'")
+      case "$st" in at\ the\ dock*|couldn*|stopped*|dock\ found*|no\ dock*) echo "$st"; break ;; esac
+    done ;;
+  localize|findme)
+    msg=$([ "$cmd" = localize ] && nav_call localize || nav_call find_myself); echo "$msg"
+    case "$msg" in localizing*|finding*) ;; *) exit 1 ;; esac   # refused: nothing to follow
+    for _ in $(seq 30); do   # follow the turn until it reports a result (up to ~60 s)
+      sleep 2
+      st=$(timeout 4 ros2 topic echo --once /robot/localize_status 2>/dev/null | sed -n "s/^data: //p" | tr -d "'")
+      case "$st" in *turning*|"") ;; *) echo "$st"; break ;; esac
+    done ;;
   calib)
     need_stack; py calib "$@" ;;
 
@@ -159,9 +182,11 @@ case "$cmd" in
               nav_call save_map map_name "'$1'" ;;
       nav)    nav_call start_navigation map_file "'${1:-}'" ;;
       stop)   nav_call stop ;;
+      continue) [ -n "$1" ] || { echo "usage: robot map continue <name>" >&2; exit 1; }
+              nav_call continue_mapping map_file "'$1'" ;;
       list|"") py maps ;;
       delete) [ -n "$1" ] || { echo "usage: robot map delete <name>" >&2; exit 1; }; py map-delete "$1" ;;
-      *) echo "robot map: start | explore | save <name> | list | nav [name] | stop | delete <name>" >&2; exit 1 ;;
+      *) echo "robot map: start | explore | continue <name> | save <name> | list | nav [name] | stop | delete <name>" >&2; exit 1 ;;
     esac ;;
 
   *) echo "unknown command: $cmd   (robot help)" >&2; exit 1 ;;

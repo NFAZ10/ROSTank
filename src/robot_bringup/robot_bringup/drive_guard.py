@@ -1,16 +1,23 @@
 """Drive guard: every drive command passes through here before the motors.
 
-  /cmd_vel (web UI, CLI, teleop, Nav2)  ->  drive_guard  ->  /cmd_vel_safe  ->  pico_bridge
+  /cmd_vel (Nav2, dock, calibration, robot move/turn)  ->  drive_guard  ->  /cmd_vel_safe  ->  pico_bridge
+  /cmd_vel_manual (web UI joystick, robot drive)       ->
 
 Looks along the direction of travel in a corridor the robot's width plus a margin: full
 speed beyond slow_dist, slowing down closer in, stopped at stop_dist (turning on the spot
 stays allowed, so the robot can be steered away). Obstacles come from the lidar (all
-around) and stereo depth (ahead, 10-50 cm high: things under the lidar's plane).
+around) and stereo depth ahead (/depth/obstacles: things off the lidar's plane, confirmed
+over several frames by stereo_depth.py).
 
 Sensors are only subscribed while driving and for wake_timeout after, so the lidar motor
 (lidar_standby.py) and stereo depth (stereo_depth.py) still idle when nothing moves. While
 the lidar spins up there is no fresh scan: until then only turning is let through.
 Why it is holding back is latched on /drive_guard/status.
+
+Override, for driving out of a spot the guard won't allow: the drive_guard/override service
+(SetBool) lets /cmd_vel_manual through unchecked, capped at override_speed. /cmd_vel stays
+guarded, so Nav2 never gets it. It turns itself off override_timeout after the last manual
+command.
 
 /wheel/cmd (per-track bench test, tracks off) does not pass through here.
 """
@@ -25,6 +32,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan, PointCloud2
 from std_msgs.msg import String
+from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformListener
 
 
@@ -52,18 +60,21 @@ class DriveGuard(Node):
         self.min_speed = p('min_speed', 0.05)      # slowed commands never go below this (m/s)
         self.wake_timeout = p('wake_timeout', 10.0)  # s after the last command before sensors idle
         self.use_depth = p('use_depth', True)
-        self.depth_height = (p('depth_min_height', 0.10), p('depth_max_height', 0.5))
-        self.depth_range = p('depth_max_range', 1.8)
+        self.override_speed = p('override_speed', 0.15)      # m/s limit while overridden
+        self.override_timeout = p('override_timeout', 20.0)  # s after the last manual command
 
         self.cmd_pub = self.create_publisher(Twist, 'cmd_vel_safe', 10)
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.status_pub = self.create_publisher(String, '/drive_guard/status', latched)
         self.create_subscription(Twist, 'cmd_vel', self.on_cmd, 10)
+        self.create_subscription(Twist, 'cmd_vel_manual', lambda m: self.on_cmd(m, manual=True), 10)
+        self.create_service(SetBool, 'drive_guard/override', self.on_override)
         self.tf = Buffer()
         TransformListener(self.tf, self)
         self.frames = {}  # sensor frame -> 4x4 into base_link (both mounts are fixed)
 
-        self.cmd, self.cmd_time, self.sent_zero = None, 0.0, True
+        self.cmd, self.cmd_time, self.sent_zero, self.cmd_manual = None, 0.0, True, False
+        self.override_until = 0.0  # monotonic; 0 = not overridden
         self.subs = None
         self.scan_pts, self.scan_time = np.zeros((0, 2)), 0.0
         self.depth_pts, self.depth_time = np.zeros((0, 2)), 0.0
@@ -77,7 +88,7 @@ class DriveGuard(Node):
         if self.subs is None:
             self.subs = [self.create_subscription(LaserScan, '/scan', self.on_scan, qos_profile_sensor_data)]
             if self.use_depth:
-                self.subs.append(self.create_subscription(PointCloud2, '/depth/points', self.on_depth,
+                self.subs.append(self.create_subscription(PointCloud2, '/depth/obstacles', self.on_depth,
                                                           qos_profile_sensor_data))
 
     def manage(self):
@@ -108,23 +119,29 @@ class DriveGuard(Node):
         self.scan_pts, self.scan_time = (M @ pts)[:2].T, time.monotonic()
 
     def on_depth(self, msg):
-        M = self.to_base(msg.header.frame_id)
-        if M is None or msg.width * msg.height == 0:
-            return
-        xyz = np.frombuffer(msg.data, np.float32).reshape(-1, msg.point_step // 4)[:, :3]
-        xyz = xyz[xyz[:, 2] < self.depth_range]  # optical z = distance
-        pts = M @ np.vstack([xyz.T, np.ones(len(xyz))])
-        keep = (pts[2] > self.depth_height[0]) & (pts[2] < self.depth_height[1])
-        self.depth_pts, self.depth_time = pts[:2, keep].T, time.monotonic()
+        # Already in base_link and filtered; an empty cloud means nothing is there.
+        xyz = np.frombuffer(msg.data, np.float32).reshape(-1, msg.point_step // 4)
+        self.depth_pts, self.depth_time = xyz[:, :2].astype(float), time.monotonic()
 
     # ---------- guarding ----------
     def set_status(self, text):
+        if self.override_until:
+            text = f'override: protection OFF, {self.override_speed:.2f} m/s max'
         if text != self.status:
             self.status = text
             self.status_pub.publish(String(data=text))
 
-    def on_cmd(self, msg):
-        self.cmd, self.cmd_time = msg, time.monotonic()
+    def on_override(self, req, res):
+        self.override_until = time.monotonic() + self.override_timeout if req.data else 0.0
+        self.get_logger().warning('override ON: manual driving unprotected' if req.data else 'override off')
+        self.set_status('ready' if self.subs is not None else 'idle')
+        res.success, res.message = True, self.status
+        return res
+
+    def on_cmd(self, msg, manual=False):
+        self.cmd, self.cmd_time, self.cmd_manual = msg, time.monotonic(), manual
+        if manual and self.override_until:
+            self.override_until = self.cmd_time + self.override_timeout
         self.wake()
         self.step()  # react now, not on the next tick
 
@@ -141,6 +158,10 @@ class DriveGuard(Node):
 
     def step(self):
         now = time.monotonic()
+        if self.override_until and now > self.override_until:
+            self.override_until = 0.0
+            self.get_logger().info('override timed out')
+            self.set_status('ready' if self.subs is not None else 'idle')
         if self.cmd is None or now - self.cmd_time > 0.5:
             if not self.sent_zero:
                 self.cmd_pub.publish(Twist())
@@ -151,7 +172,9 @@ class DriveGuard(Node):
         out = Twist()
         out.angular.z = self.cmd.angular.z
         v = self.cmd.linear.x
-        if abs(v) > 1e-3:
+        if self.override_until and self.cmd_manual:
+            v = max(-self.override_speed, min(self.override_speed, v))
+        elif abs(v) > 1e-3:
             if now - self.scan_time > 0.5:
                 v = 0.0
                 self.set_status('waiting for lidar (turning only)')

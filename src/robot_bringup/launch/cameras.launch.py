@@ -8,7 +8,7 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import ComposableNodeContainer, Node
@@ -17,17 +17,7 @@ from launch_ros.descriptions import ComposableNode
 # NITROS nodes agree on image formats (rgb8 / nv12 ...) during this window after they
 # start. The default 1 s is shorter than an Argus camera takes to open, so a camera
 # and its resizer could settle on different formats and no preview frames would flow.
-NEGOTIATION_S = 5
-
-# NITROS nodes agree on image formats (rgb8 / nv12 ...) during this window after they
-# start. The default 1 s is shorter than an Argus camera takes to open, so a camera
-# and its resizer could settle on different formats and no preview frames would flow.
-NEGOTIATION_S = 5
-
-# NITROS nodes agree on image formats (rgb8 / nv12 ...) during this window after they
-# start. The default 1 s is shorter than an Argus camera takes to open, so a camera
-# and its resizer could settle on different formats and no preview frames would flow.
-NEGOTIATION_S = 5
+NEGOTIATION_S = 12
 
 
 def argus_mono(side, camera_id, mode, calib):
@@ -38,8 +28,6 @@ def argus_mono(side, camera_id, mode, calib):
         namespace='',
         parameters=[{
             'camera_id': camera_id,
-            'type_negotiation_duration_s': NEGOTIATION_S,
-            'type_negotiation_duration_s': NEGOTIATION_S,
             'type_negotiation_duration_s': NEGOTIATION_S,
             'mode': mode,
             'camera_link_frame_name': 'stereo_camera',
@@ -65,8 +53,6 @@ def preview_resize(side):
         plugin='nvidia::isaac_ros::image_proc::ResizeNode',
         namespace='',
         parameters=[{
-            'type_negotiation_duration_s': NEGOTIATION_S,
-            'type_negotiation_duration_s': NEGOTIATION_S,
             'type_negotiation_duration_s': NEGOTIATION_S,
             'input_width': 1640,
             'input_height': 1232,
@@ -101,29 +87,37 @@ def preview_jpeg(side):
     )
 
 
-def generate_launch_description():
+def side_nodes(context):
     calib = os.path.join(get_package_share_directory('robot_bringup'), 'config', 'calibration')
-    return LaunchDescription([
-        DeclareLaunchArgument('left_id', default_value='1'),
-        DeclareLaunchArgument('right_id', default_value='0'),
-        # IMX219 modes: 0=3280x2464@21 1=3280x1848@28 2=1920x1080@30 3=1640x1232@30 4=1280x720@60
-        DeclareLaunchArgument('mode', default_value='3'),
-        DeclareLaunchArgument('preview', default_value='true'),
+    choice = LaunchConfiguration('side').perform(context)
+    sides = ('left', 'right') if choice == 'both' else (choice,)
+    ids = {'left': LaunchConfiguration('left_id'), 'right': LaunchConfiguration('right_id')}
+    nodes = []
+    for side in sides:
+        nodes += [argus_mono(side, ids[side], LaunchConfiguration('mode'), calib), preview_resize(side)]
+    return [
         ComposableNodeContainer(
-            name='camera_container',
+            name=f'camera_container_{choice}',
             namespace='',
             package='rclcpp_components',
             executable='component_container_mt',
             respawn=True,
             respawn_delay=3.0,
-            composable_node_descriptions=[
-                argus_mono('left', LaunchConfiguration('left_id'), LaunchConfiguration('mode'), calib),
-                argus_mono('right', LaunchConfiguration('right_id'), LaunchConfiguration('mode'), calib),
-                preview_resize('left'),
-                preview_resize('right'),
-            ],
+            composable_node_descriptions=nodes,
             output='screen',
         ),
-        preview_jpeg('left'),
-        preview_jpeg('right'),
+        *[preview_jpeg(side) for side in sides],
+    ]
+
+
+def generate_launch_description():
+    return LaunchDescription([
+        # One camera or both. On the robot, camera_manager.py starts each side when it's needed.
+        DeclareLaunchArgument('side', default_value='both'),
+        DeclareLaunchArgument('left_id', default_value='1'),
+        DeclareLaunchArgument('right_id', default_value='0'),
+        # IMX219 modes: 0=3280x2464@21 1=3280x1848@28 2=1920x1080@30 3=1640x1232@30 4=1280x720@60
+        DeclareLaunchArgument('mode', default_value='3'),
+        DeclareLaunchArgument('preview', default_value='true'),
+        OpaqueFunction(function=side_nodes),
     ])
