@@ -53,6 +53,9 @@ $(bold "Mapping and navigation")
   robot where                   where the robot is (map frame if navigating)
   robot dock                    find the dock's AprilTag and drive up to it (while mapping/navigating)
   robot dock check              look (no driving) for the tag and remember the dock for this map
+  robot dock plug               plug into the charger from here (the dock tag in view, any mode)
+  robot dock undock             back off the dock
+  robot dock learn              on the charger: measure the dock and use it as the docking target
   robot localize                after a pose guess: turn until the lidar matches the map
   robot findme                  work out where it is on the whole map from scratch (turns on the spot)
 
@@ -131,12 +134,13 @@ case "$cmd" in
   stop-motors)
     need_stack; py stop ;;
   dock)
-    if [ "$1" = check ]; then msg=$(nav_call check_dock); else msg=$(nav_call go_dock); fi; echo "$msg"
-    case "$msg" in going*|checking*) ;; *) exit 1 ;; esac   # refused: nothing to follow
+    case "$1" in check) svc=check_dock ;; plug) svc=plug_in ;; undock) svc=undock ;; learn) svc=learn_dock ;; *) svc=go_dock ;; esac
+    msg=$(nav_call $svc); echo "$msg"
+    case "$msg" in going*|checking*|plugging*|undocking*|learning*) ;; *) exit 1 ;; esac   # refused: nothing to follow
     for _ in $(seq 60); do   # follow until it reports a result (up to ~2 min)
       sleep 2
       st=$(timeout 4 ros2 topic echo --once /dock/status 2>/dev/null | sed -n "s/^data: //p" | tr -d "'")
-      case "$st" in at\ the\ dock*|couldn*|stopped*|dock\ found*|no\ dock*) echo "$st"; break ;; esac
+      case "$st" in docked*|dock\ learned*|off\ the\ dock*|couldn*|lost*|the\ camera*|stopped*|dock\ found*|no\ dock*|no\ /odom*) echo "$st"; break ;; esac
     done ;;
   localize|findme)
     msg=$([ "$cmd" = localize ] && nav_call localize || nav_call find_myself); echo "$msg"

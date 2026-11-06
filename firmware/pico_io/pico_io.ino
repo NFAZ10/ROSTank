@@ -7,7 +7,9 @@
 //                  "L <group> <first> <n> <effect> <r> <g> <b> <w> <period_ms>"
 //                                                  light LEDs first..first+n-1 of a group;
 //                                                  effect 0 off, 1 solid, 2 blink, 3 breathe, 4 chase,
-//                                                  5 wig-wag (first half, then second half)
+//                                                  5 wig-wag (first half, then second half),
+//                                                  6 two-colour wig-wag: halves swap between r,g,b and
+//                                                  the white w (on RGB-only parts w is mixed white)
 //                  "K"                             keepalive (any line counts)
 //   pico -> host   "N pico_io <version>"           identity, every 2 s
 //                  "R <mm> <ok>"                   VL53L0X range, ~30 Hz; ok 0 = no target in range,
@@ -16,6 +18,9 @@
 //                  "I <gx> <gy> <gz> <ax> <ay> <az>"  MPU6050 raw counts, chip axes, 50 Hz:
 //                                                  gyro 65.5 per deg/s (+-500), accel 4096 per g (+-8 g)
 //                  "M <who_am_i>"                  IMU chip id in decimal, every 2 s; -1 while it's missing
+//                  "Q <bus_recoveries>"            I2C controller resets so far (glitches), every 2 s
+//                  "V <mV>"                        charge port sense at the GP26 pin (before the divider
+//                                                  is scaled back up), 16-sample average, every 200 ms
 // Channels are 0-255. 255 is steady on (no PWM flicker for the cameras); on a group without a
 // white chip, w is mixed into r, g and b. Effects use the shared millis() clock, so blinks line up
 // across groups. No line from the host for HOST_TIMEOUT_MS: everything off but a dim red
@@ -24,9 +29,13 @@
 // Wiring (LED data through a 74AHCT125 at 5 V, 330 R in series at each strip, 10k pull-down on
 // each data pin so the LEDs stay dark while the Pico boots):
 //   LED groups: 0 headlights GP18 (two 7-LED RGBW discs), 1 body strips GP20 (three 8-LED RGBW
-//   strips chained right -> back -> left, 24 LEDs), 2 spare GP16, 3 spare GP19
+//   strips chained right -> back -> left, 24 LEDs), 2 spare GP16, 3 front bar GP19 (8 RGB, GRB)
 //   VL53L0X: SDA GP4, SCL GP5, XSHUT GP7 (high = on)      DHT11: data GP6 (10k pull-up to 3.3 V)
-//   MPU6050: same I2C bus, AD0 low (0x68); INT isn't used, data-ready is read from the chip
+//   MPU6050: same I2C bus, AD0 low (0x68); its INT is wired to GP8 but isn't used (left an input):
+//   data-ready is read from the chip. A sensor that stops answering gets the I2C controller reset
+//   and the bus clocked free (busRecover) before the retry: after an electrical glitch (LED
+//   switching) the controller could stay stuck until the Pico rebooted.
+//   Charge port sense: port + (charger side of the 1N5822) - 6.8k - GP26 - 1.5k - AGND
 // Sensors run on core 1 (the DHT11 read blocks ~25 ms with interrupts off, so it costs the IMU a
 // sample every 2 s); LEDs and serial on core 0.
 
@@ -36,18 +45,19 @@
 #include <VL53L0X.h>
 #include <Wire.h>
 
-#define VERSION 4
+#define VERSION 8
 const int GROUPS = 4, MAX_LEDS = 60;
 const int GROUP_PIN[GROUPS] = {18, 20, 16, 19};
 const int BODY_GROUP = 1, BACK_FIRST = 8, BACK_N = 8;  // the back strip, for the link-lost glow
-const int SDA_PIN = 4, SCL_PIN = 5, XSHUT_PIN = 7, DHT_PIN = 6;
+const int SDA_PIN = 4, SCL_PIN = 5, XSHUT_PIN = 7, DHT_PIN = 6, CHARGE_SENSE_PIN = 26;
 const uint32_t HOST_TIMEOUT_MS = 2000;
 const uint32_t FRAME_MS = 20;           // 50 Hz animation
 const uint32_t IDENT_MS = 2000, DHT_MS = 2000, SENSOR_RETRY_MS = 1000;
 const uint32_t TOF_TIMEOUT_MS = 200, IMU_TIMEOUT_MS = 200, IMU_PERIOD_MS = 18;  // just under the chip's 20 ms
+const uint32_t IMU_RETRY_MS = 2000;  // a reset blocks the bus ~100 ms: don't starve the ToF
 const uint16_t TYPES[4] = {NEO_GRB + NEO_KHZ800, NEO_RGB + NEO_KHZ800, NEO_RGBW + NEO_KHZ800, NEO_GRBW + NEO_KHZ800};
 
-enum Effect : uint8_t { OFF = 0, SOLID, BLINK, BREATHE, CHASE, WIGWAG };
+enum Effect : uint8_t { OFF = 0, SOLID, BLINK, BREATHE, CHASE, WIGWAG, WIGWAG2 };
 struct Led {
   uint8_t effect, r, g, b, w;
   uint16_t period;
@@ -61,7 +71,8 @@ Adafruit_NeoPixel strip[GROUPS] = {
 Led leds[GROUPS][MAX_LEDS];
 int groupCount[GROUPS] = {0, 0, 0, 0};
 bool groupRGBW[GROUPS] = {false, false, false, false};
-uint32_t lastHostMs = 0, lastFrameMs = 0, lastIdentMs = 0;
+uint32_t lastHostMs = 0, lastFrameMs = 0, lastIdentMs = 0, lastSenseMs = 0;
+const uint32_t SENSE_MS = 200;
 bool hostSeen = false;
 char line[96];
 uint8_t lineLen = 0;
@@ -74,6 +85,7 @@ volatile uint32_t dhtSeq = 0;
 volatile int16_t imuSample[6];        // gx gy gz ax ay az
 volatile uint32_t imuSeq = 0;         // odd while core 1 is writing imuSample
 volatile int32_t imuId = -1;
+volatile uint32_t busRecoveries = 0;
 
 // ---------------- LEDs (core 0) ----------------
 void configureGroup(int g, int count, int type) {
@@ -91,7 +103,7 @@ void configureGroup(int g, int count, int type) {
 }
 
 void setLeds(int g, int first, int n, int effect, int r, int gr, int b, int w, int period) {
-  if (g < 0 || g >= GROUPS || first < 0 || n < 1 || first + n > MAX_LEDS || effect < 0 || effect > WIGWAG) return;
+  if (g < 0 || g >= GROUPS || first < 0 || n < 1 || first + n > MAX_LEDS || effect < 0 || effect > WIGWAG2) return;
   for (int i = first; i < first + n; i++)
     leds[g][i] = Led{(uint8_t)effect, (uint8_t)constrain(r, 0, 255), (uint8_t)constrain(gr, 0, 255),
                      (uint8_t)constrain(b, 0, 255), (uint8_t)constrain(w, 0, 255),
@@ -102,7 +114,8 @@ void setLeds(int g, int first, int n, int effect, int r, int gr, int b, int w, i
 float level(const Led &l, int index, uint32_t now) {
   float phase = (now % l.period) / (float)l.period;
   switch (l.effect) {
-    case SOLID: return 1.0f;
+    case SOLID:
+    case WIGWAG2: return 1.0f;
     case BLINK: return phase < 0.5f ? 1.0f : 0.0f;
     case BREATHE: return 0.5f - 0.5f * cosf(2.0f * PI * phase);
     case CHASE: {  // a short comet running first -> last
@@ -127,6 +140,10 @@ void render(uint32_t now) {
       }
       float k = level(l, i, now);
       int r = l.r * k, gr = l.g * k, b = l.b * k, w = l.w * k;
+      if (l.effect == WIGWAG2) {  // halves swap between the colour and the white
+        bool colour = ((i - l.segFirst) * 2 < l.segN) == ((now % l.period) * 2 < l.period);
+        if (colour) w = 0; else r = gr = b = 0;
+      }
       if (!groupRGBW[g]) { r = min(255, r + w); gr = min(255, gr + w); b = min(255, b + w); w = 0; }
       strip[g].setPixelColor(i, r, gr, b, w);
     }
@@ -161,6 +178,7 @@ void readSerial() {
 void setup() {
   Serial.begin(115200);
   pinMode(LED_BUILTIN, OUTPUT);
+  analogReadResolution(12);
   for (int g = 0; g < GROUPS; g++) configureGroup(g, 0, 0);
 }
 
@@ -191,10 +209,17 @@ void loop() {
       Serial.printf("I %d %d %d %d %d %d\n", v[0], v[1], v[2], v[3], v[4], v[5]);
     }
   }
+  if (now - lastSenseMs >= SENSE_MS) {
+    lastSenseMs = now;
+    uint32_t sum = 0;
+    for (int i = 0; i < 16; i++) sum += analogRead(CHARGE_SENSE_PIN);
+    Serial.printf("V %lu\n", (unsigned long)(sum * 3300UL / (16UL * 4095UL)));
+  }
   if (now - lastIdentMs >= IDENT_MS) {
     lastIdentMs = now;
     Serial.printf("N pico_io %d\n", VERSION);
     Serial.printf("M %ld\n", (long)imuId);
+    Serial.printf("Q %lu\n", (unsigned long)busRecoveries);
   }
   if (now - lastFrameMs >= FRAME_MS) {
     lastFrameMs = now;
@@ -276,13 +301,36 @@ bool startTof() {
   return true;
 }
 
-void setup1() {
-  pinMode(XSHUT_PIN, OUTPUT);
+void startBus() {
   Wire.setSDA(SDA_PIN);
   Wire.setSCL(SCL_PIN);
   Wire.begin();
-  Wire.setClock(400000);
+  Wire.setClock(100000);  // 400 kHz kept losing the IMU (marginal pull-ups); 100 kHz is plenty for 50 Hz + the ToF
   Wire.setTimeout(50);
+}
+
+// Reset the I2C controller and free a slave holding SDA low (9 clocks, then a STOP).
+void busRecover() {
+  Wire.end();
+  pinMode(SDA_PIN, INPUT_PULLUP);
+  pinMode(SCL_PIN, OUTPUT);
+  for (int i = 0; i < 9 && !digitalRead(SDA_PIN); i++) {
+    digitalWrite(SCL_PIN, LOW); delayMicroseconds(5);
+    digitalWrite(SCL_PIN, HIGH); delayMicroseconds(5);
+  }
+  pinMode(SDA_PIN, OUTPUT);  // STOP: SDA low -> high while SCL is high
+  digitalWrite(SDA_PIN, LOW); delayMicroseconds(5);
+  digitalWrite(SCL_PIN, HIGH); delayMicroseconds(5);
+  digitalWrite(SDA_PIN, HIGH); delayMicroseconds(5);
+  pinMode(SDA_PIN, INPUT);
+  pinMode(SCL_PIN, INPUT);
+  startBus();
+  busRecoveries = busRecoveries + 1;
+}
+
+void setup1() {
+  pinMode(XSHUT_PIN, OUTPUT);
+  startBus();
   dht.begin();
 }
 
@@ -306,7 +354,10 @@ void loop1() {
       rangeMissingSeq++;
     }
   }
-  if (!imuUp && now - lastImuTry >= SENSOR_RETRY_MS) {
+  if (!imuUp && now - lastImuTry >= (lastImuTry ? IMU_RETRY_MS : 0)) {
+    if (lastImuTry) {  // it was up, or the last try failed: start from a clean bus
+      busRecover();  // the ToF keeps ranging through this (its continuous mode lives in the sensor)
+    }
     lastImuTry = now;
     imuUp = startImu();
     if (!imuUp) imuId = -1;

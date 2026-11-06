@@ -2,11 +2,14 @@
 pico_io:
   ros__parameters:
     port: /dev/pico_io
-    # Per group [headlights GP18, body strips GP20, spare GP16, spare GP19]:
+    # Per group [headlights GP18, body strips GP20, spare GP16, front bar GP19]:
     # LED count (0 = nothing wired) and colour order: 0 GRB, 1 RGB, 2 RGBW, 3 GRBW.
     # SK6812 RGBW parts are usually GRBW on the wire; if white shows as a colour, try 2.
     # Headlights: two 7-LED RGBW discs (14). Body: 3 x 8-LED RGBW strips (24).
-    group_counts: [14, 24, 0, 0]
+    # Front bar: the original 8-LED RGB (GRB) strip; it flashes orange / white with the sides
+    # while the robot may drive itself. On an RGB strip white is all three colours: 8 LEDs at
+    # full white draw ~0.5 A, so feed it from the 5 V buck.
+    group_counts: [14, 24, 0, 8]
     group_types: [3, 3, 0, 0]
     headlight_groups: [0]
     # Body strips along the chain from the Pico: right side, then back, then left side.

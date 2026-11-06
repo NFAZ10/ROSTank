@@ -4,6 +4,7 @@ Services (std_srvs/Trigger, empty request):
   /robot/start_mapping     SLAM + Nav2 (robot_navigation navigation.launch.py)
   /robot/start_exploring   mapping + explorer.py driving to unexplored edges until the map is
                            complete (mode 'exploring'; back to 'mapping' when done, ready to save)
+  /robot/stop_exploring    exploring -> mapping: the explorer stops, the map keeps going (auto-dock)
   /robot/save_map          save the SLAM map to ~/robot_ws/maps/<map_name param, else map_<time>>
                            and point latest.yaml at it; also slam_toolbox's pose graph
                            (<name>.posegraph/.data), so the map can be continued later
@@ -73,6 +74,7 @@ class NavManager(Node):
 
         self.create_service(Trigger, '/robot/start_mapping', self.on_start_mapping)
         self.create_service(Trigger, '/robot/start_exploring', self.on_start_exploring)
+        self.create_service(Trigger, '/robot/stop_exploring', self.on_stop_exploring)
         self.create_service(Trigger, '/robot/continue_mapping', self.on_continue_mapping)
         self.continue_name = ''  # map being continued (saving under this name may overwrite it)
         self.explorer = None
@@ -245,6 +247,17 @@ class NavManager(Node):
             pending = os.path.join(self.map_dir, name)
             if os.path.exists(pending):
                 os.remove(pending)
+
+    def on_stop_exploring(self, request, response):
+        if self.mode != 'exploring':
+            response.success, response.message = False, 'not exploring'
+            return response
+        self.stop_explorer()
+        self.mode = 'mapping'
+        self.publish_mode()
+        self.get_logger().info('exploring stopped, still mapping')
+        response.success, response.message = True, 'stopped exploring (still mapping)'
+        return response
 
     def on_start_exploring(self, request, response):
         if self.mode not in ('mapping', 'exploring'):

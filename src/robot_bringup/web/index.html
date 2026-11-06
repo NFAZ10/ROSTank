@@ -143,6 +143,10 @@ label.slider input { flex: 1; accent-color: var(--accent); }
 .result b { font-weight: 600; }
 .seg { margin-bottom: 8px; }
 .seg button { padding: 6px 12px; font-size: 13px; }
+.lightzones { display: grid; grid-template-columns: auto 1fr; gap: 0 10px; align-items: center; margin-top: 4px; }
+.lightzones .seg { margin-bottom: 4px; }
+.lightzones > span { font-size: 13px; }
+.lightcolor { width: 34px; height: 30px; padding: 0 2px; border: 1px solid var(--line, #8884); border-radius: 6px; background: none; cursor: pointer; }
 .camview {
   position: relative; aspect-ratio: 4 / 3; background: var(--map-unknown); border-radius: 8px; overflow: hidden;
   display: grid; place-items: center;
@@ -185,6 +189,7 @@ label.slider input { flex: 1; accent-color: var(--accent); }
   <span class="pill"><span class="dot" id="dPico"></span>Drive</span>
   <span class="pill"><span class="dot" id="dLidar"></span>Lidar</span>
   <span class="pill" title="Pack voltage and approximate charge (LiFePO4)"><span class="dot" id="dBatt"></span>Battery <b id="tBatt">—</b></span>
+  <span class="pill" id="pCharger" title="Voltage at the charge port (charger side of its diode)"><span class="dot" id="dCharger"></span>Charger <b id="tCharger">—</b></span>
   <span class="pill" id="pIMU" title="IMU on the sensor board, used as the robot's gyro"><span class="dot" id="dIMU"></span>IMU <b id="tIMU">—</b></span>
   <span class="pill" title="Sensor/LED board: temperature and humidity (DHT11)"><span class="dot" id="dIO"></span>IO <b id="tIO">—</b></span>
   <div class="svcwrap">
@@ -206,7 +211,10 @@ label.slider input { flex: 1; accent-color: var(--accent); }
       <button id="toolPose" title="Drag on the map: where the robot really is, and which way it faces">Set pose</button>
       <button id="locBtn" data-nav="localize" hidden title="Turn on the spot until the lidar matches the map (after Set pose)">Localize</button>
       <button id="checkDockBtn" data-nav="check_dock" hidden title="Look (without moving) for the dock's AprilTag and remember where it is">Check for dock</button>
-      <button id="dockBtn" data-nav="go_dock" hidden title="Find the dock's AprilTag and drive up to it">Go to dock</button>
+      <button id="dockBtn" data-nav="go_dock" hidden title="Find the dock's AprilTag, drive up to it and plug in">Go to dock</button>
+      <button id="plugBtn" data-nav="plug_in" hidden title="Plug into the charger from here: the dock's tag must be in front of the camera">Plug in</button>
+      <button id="undockBtn" data-nav="undock" hidden title="Back 30 cm off the dock">Undock</button>
+      <button id="learnDockBtn" data-nav="learn_dock" hidden title="Robot parked on the charger by hand: measure the dock and use this as the docking target (redo after moving the dock)">Learn dock</button>
       <button id="findBtn" data-nav="find_myself" hidden title="Work out where it is on the whole map from scratch, by turning on the spot">Find me</button>
       <span class="spacer"></span>
       <button id="costmapBtn" title="Show what Nav2 plans around: its global costmap, and the local one around the robot">Costmap</button>
@@ -252,7 +260,25 @@ label.slider input { flex: 1; accent-color: var(--accent); }
         <button data-head="off">Off</button>
         <button data-head="dim" title="Dimmed LEDs flicker on camera; use On while recording">Dim</button>
         <button data-head="on">On</button>
+        <input type="color" class="lightcolor" data-color="headlights" value="#ffffff" title="Headlight colour. White is steady on camera; other colours flicker.">
         <span class="msg" id="rangeMsg" style="margin:0 0 0 auto" title="VL53L0X front distance sensor"></span>
+      </div>
+      <div class="lightzones">
+        <span>Side lights</span>
+        <div class="row seg" data-zone="sides" title="Auto: dim white, turn signals, orange / white flash while the robot drives itself. On: steady white.">
+          <button data-mode="auto">Auto</button><button data-mode="off">Off</button><button data-mode="on">On</button>
+          <input type="color" class="lightcolor" value="#ffffff" title="Colour for On (picking one switches it on)">
+        </div>
+        <span>Back light</span>
+        <div class="row seg" data-zone="back" title="Auto: tail light, brake, reversing, amber flash while the robot drives itself. On: bright red.">
+          <button data-mode="auto">Auto</button><button data-mode="off">Off</button><button data-mode="on">On</button>
+          <input type="color" class="lightcolor" value="#ffffff" title="Colour for On (picking one switches it on)">
+        </div>
+        <span>Front bar</span>
+        <div class="row seg" data-zone="front" title="Auto: dark, orange / white flash while the robot drives itself. On: steady white.">
+          <button data-mode="auto">Auto</button><button data-mode="off">Off</button><button data-mode="on">On</button>
+          <input type="color" class="lightcolor" value="#ffffff" title="Colour for On (picking one switches it on)">
+        </div>
       </div>
       <div class="msg" style="margin-top:6px">Drag the joystick (up/down drives, left/right turns), or use the arrow keys / WASD. The robot slows near obstacles and stops 12 cm short.</div>
       <div class="msg" id="guardMsg" style="margin-top:0"></div>
@@ -442,10 +468,40 @@ function showIO(io) {
     b.classList.toggle('on', b.dataset.head === io.headlights);
     b.disabled = !io.connected;
   });
+  document.querySelectorAll('[data-zone]').forEach((z) => z.querySelectorAll('button').forEach((b) => {
+    b.classList.toggle('on', b.dataset.mode === (io[z.dataset.zone] || 'auto'));
+    b.disabled = !io.connected;
+  }));
+  const colors = io.colors || {};
+  document.querySelectorAll('.lightcolor').forEach((c) => {
+    const zone = c.dataset.color || c.parentElement.dataset.zone;
+    if (colors[zone] && document.activeElement !== c) c.value = colors[zone];
+    c.disabled = !io.connected;
+  });
   $('rangeMsg').textContent = !io.range_ok ? '' : io.range === null ? 'Front: clear' : `Front: ${Math.round(io.range * 100)} cm`;
 }
 document.querySelectorAll('[data-head]').forEach((b) => {
   b.onclick = () => api('/api/lights', { headlights: b.dataset.head }).then(pollState).catch(() => {});
+});
+document.querySelectorAll('.lightcolor').forEach((c) => {
+  c.oninput = () => {  // throttled: the picker fires many events while dragging
+    clearTimeout(c.timer);
+    c.timer = setTimeout(async () => {
+      const zone = c.dataset.color || c.parentElement.dataset.zone;
+      try {
+        await api('/api/lights', { zone, color: c.value });
+        if (zone === 'headlights') {
+          if (!document.querySelector('[data-head].on:not([data-head="off"])')) await api('/api/lights', { headlights: 'on' });
+        } else {
+          await api('/api/lights', { zone, mode: 'on' });
+        }
+        pollState();
+      } catch (e) {}
+    }, 150);
+  };
+});
+document.querySelectorAll('[data-zone] button').forEach((b) => {
+  b.onclick = () => api('/api/lights', { zone: b.parentElement.dataset.zone, mode: b.dataset.mode }).then(pollState).catch(() => {});
 });
 
 async function pollState() {
@@ -469,7 +525,10 @@ async function pollState() {
     showTest(state.test);
     showNav(state);
     const b = state.battery || {};
-    $('tBatt').textContent = b.present ? `${b.voltage.toFixed(1)} V · ${b.percent}%` : '—';
+    $('tBatt').textContent = b.present ? `${b.voltage.toFixed(2)} V · ${b.percent}%` : '—';
+    const cv = state.charger_voltage;
+    $('tCharger').textContent = cv === null || cv === undefined ? '—' : state.charger ? `${cv.toFixed(1)} V · charging` : 'not connected';
+    setDot('dCharger', state.charger ? 'ok' : '');
     setDot('dBatt', !b.present ? '' : /critical|shutting/.test(b.status) ? 'bad' : /low/.test(b.status) ? 'busy' : 'ok');
     showIO(state.io || {});
     showIMU(state.imu || '');
@@ -784,7 +843,9 @@ function showNav(st) {
   $('locBtn').hidden = $('findBtn').hidden = st.mode !== 'navigating';
   $('dockBtn').hidden = !['mapping', 'navigating'].includes(st.mode);
   $('checkDockBtn').hidden = !['mapping', 'exploring', 'navigating'].includes(st.mode);
-  if (st.dock && ['mapping', 'exploring', 'navigating'].includes(st.mode)) el.innerHTML += `<br>Dock: ${st.dock}`;
+  $('plugBtn').hidden = state.stack !== 'active' || !!state.charger;
+  $('undockBtn').hidden = $('learnDockBtn').hidden = state.stack !== 'active' || !state.charger;
+  if (st.dock) el.innerHTML += `<br>Dock: ${st.dock}`;
   $('saveBtn').disabled = !['mapping', 'exploring'].includes(st.mode);
   if (st.nav_map && ['mapping', 'exploring'].includes(st.mode) && !$('mapName').value && document.activeElement !== $('mapName')) $('mapName').value = st.nav_map;
   $('mapName').disabled = !['mapping', 'exploring'].includes(st.mode);

@@ -58,14 +58,14 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profi
 from rclpy.time import Time
 from sensor_msgs.msg import (BatteryState, CompressedImage, Image, Imu, JointState, LaserScan, Range,
                              RelativeHumidity, Temperature)
-from std_msgs.msg import Bool, Float64MultiArray, String
+from std_msgs.msg import Bool, Float32, Float64MultiArray, String
 from std_srvs.srv import SetBool, Trigger
 from tf2_ros import Buffer, TransformListener
 
 from robot_bringup.stereo_calib import NOVELTY, SIDES, StereoSession, find_corners, sample_params
 
 CALIB_PARAMS = ['wheel_radius', 'track_width', 'invert_left', 'invert_right', 'swap_sides']
-NAV_COMMANDS = ['start_mapping', 'start_exploring', 'save_map', 'start_navigation', 'stop', 'localize', 'find_myself', 'go_dock', 'check_dock', 'continue_mapping']
+NAV_COMMANDS = ['start_mapping', 'start_exploring', 'save_map', 'start_navigation', 'stop', 'localize', 'find_myself', 'go_dock', 'check_dock', 'continue_mapping', 'plug_in', 'undock', 'learn_dock']
 MAP_NAME_RE = re.compile(r'^[A-Za-z0-9_-]{1,40}$')  # same rule as nav_manager
 MAX_V, MAX_W = 0.4, 1.5
 STACK_UNIT = 'robot.service'
@@ -178,6 +178,11 @@ class WebUI(Node):
         self.battery, self.battery_time, self.battery_status = None, 0.0, ''
         self.create_subscription(BatteryState, '/battery', self.on_battery, 10)
         self.create_subscription(String, '/battery/status', lambda m: setattr(self, 'battery_status', m.data), latched)
+        self.charger = None  # /charger/connected from the sensor board's charge-port sense
+        self.create_subscription(Bool, '/charger/connected', lambda m: setattr(self, 'charger', m.data), latched)
+        self.charger_v = (None, 0.0)  # (volts at the charge port, monotonic time)
+        self.create_subscription(Float32, '/charger/voltage',
+                                 lambda m: setattr(self, 'charger_v', (m.data, time.monotonic())), 10)
         self.create_subscription(String, '/explore/status', lambda m: setattr(self, 'explore', m.data), latched)
         self.create_subscription(String, '/drive_guard/status', lambda m: setattr(self, 'guard', m.data), latched)
         # Sensor + LED Pico (pico_io.py): lights status, front range, temperature/humidity.
@@ -190,6 +195,8 @@ class WebUI(Node):
         self.imu_status = ''
         self.create_subscription(String, '/imu/status', lambda m: setattr(self, 'imu_status', m.data), latched)
         self.headlights_pub = self.create_publisher(String, '/lights/headlights', 10)
+        self.light_zone_pub = self.create_publisher(String, '/lights/zone', 10)
+        self.light_color_pub = self.create_publisher(String, '/lights/color', 10)
         self.io = {}  # name -> (value, monotonic time)
         self.create_subscription(Range, '/range/front', lambda m: self.io_value('range', m.range), 10)
         self.create_subscription(Temperature, '/temperature', lambda m: self.io_value('temp', m.temperature), 10)
@@ -327,6 +334,19 @@ class WebUI(Node):
         if level not in ('off', 'dim', 'on'):
             raise ValueError('headlights: off, dim or on')
         self.headlights_pub.publish(String(data=level))
+        return {'ok': True}
+
+    def set_light_zone(self, zone, mode):
+        if zone not in ('sides', 'back', 'front') or mode not in ('auto', 'off', 'on'):
+            raise ValueError('lights: zone sides, back or front; mode auto, off or on')
+        self.light_zone_pub.publish(String(data=f'{zone} {mode}'))
+        return {'ok': True}
+
+    def set_light_color(self, zone, color):
+        if zone not in ('headlights', 'sides', 'back', 'front') or not isinstance(color, str) \
+                or not re.fullmatch(r'#[0-9a-fA-F]{6}', color):
+            raise ValueError('lights: zone headlights, sides, back or front; color #rrggbb')
+        self.light_color_pub.publish(String(data=f'{zone} {color}'))
         return {'ok': True}
 
     def on_wheels(self, msg):
@@ -828,6 +848,9 @@ class WebUI(Node):
             'dock_pose': self.dock_pose(),
             'plan': self.plan if time.monotonic() - self.plan_time < 3.0 and world == 'map' else [],
             'battery': self.battery_payload(),
+            'charger': self.charger,
+            'charger_voltage': (round(self.charger_v[0], 2) if self.charger_v[0] is not None
+                                and time.monotonic() - self.charger_v[1] < 2.0 else None),
             'io': self.io_payload(),
             # Latched, so it outlives the driver: only believed while the driver is there.
             'imu': self.imu_status if self.count_publishers('/imu/data') else '',
@@ -1419,7 +1442,12 @@ def make_handler(node, web_dir):
                 elif path == '/api/calib':
                     self.send(200, node.apply_calib(body))
                 elif path == '/api/lights':
-                    self.send(200, node.set_headlights(body.get('headlights')))
+                    if 'color' in body:
+                        self.send(200, node.set_light_color(body.get('zone'), body.get('color')))
+                    elif 'zone' in body:
+                        self.send(200, node.set_light_zone(body.get('zone'), body.get('mode')))
+                    else:
+                        self.send(200, node.set_headlights(body.get('headlights')))
                 else:
                     self.send(404, {'error': 'not found'})
             except Exception as e:
