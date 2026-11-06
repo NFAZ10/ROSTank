@@ -1,4 +1,4 @@
-"""One switchable service, started by service_manager.py: service:=imu | sensors | crash | foxglove | rosbridge."""
+"""One switchable service, started by service_manager.py: service:=imu | sensors | crash | foxglove | rosbridge | claude."""
 import os
 
 from ament_index_python.packages import get_package_share_directory
@@ -32,6 +32,8 @@ def service_nodes(context):
                          parameters=[os.path.join(share, 'config', 'pico_io.yaml')], output='screen')],
         # Crash detection: stops the robot and marks the spot on the map.
         'crash': [Node(package='robot_bringup', executable='crash_monitor', output='screen')],
+        # Claude vision: after a crash (or when asked) sends a camera frame to the Claude API.
+        'claude': [Node(package='robot_bringup', executable='claude_vision', output='screen')],
         'foxglove': [Node(package='foxglove_bridge', executable='foxglove_bridge', parameters=[{
             'port': 8765,
             'topic_whitelist': FOXGLOVE_TOPICS,

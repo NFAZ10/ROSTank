@@ -19,7 +19,8 @@ from std_srvs.srv import SetBool
 
 from robot_bringup.camera_manager import Proc
 
-SERVICES = ('imu', 'sensors', 'crash', 'foxglove', 'rosbridge')
+SERVICES = ('imu', 'sensors', 'crash', 'foxglove', 'rosbridge', 'claude')
+DEFAULT_OFF = ('claude',)  # sends camera pictures off the robot: only when switched on
 
 
 def launch_command(name):
@@ -27,13 +28,13 @@ def launch_command(name):
 
 
 def load_choices(path):
-    """Saved on/off per service; anything missing or unreadable is on."""
+    """Saved on/off per service; anything missing or unreadable is on (DEFAULT_OFF: off)."""
     try:
         with open(path) as f:
             saved = json.load(f)
     except (OSError, ValueError):
         saved = {}
-    return {name: saved.get(name, True) is not False for name in SERVICES}
+    return {name: saved.get(name, name not in DEFAULT_OFF) is not False for name in SERVICES}
 
 
 class ServiceManager(Node):

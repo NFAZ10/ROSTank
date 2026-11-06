@@ -7,3 +7,4 @@ firmware/pico_drive/build/
 __pycache__/
 *.pyc
 isaac_ros_assets/
+vision_log/

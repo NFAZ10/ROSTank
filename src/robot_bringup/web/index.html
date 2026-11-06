@@ -146,6 +146,9 @@ label.slider input { flex: 1; accent-color: var(--accent); }
 .lightzones { display: grid; grid-template-columns: auto 1fr; gap: 0 10px; align-items: center; margin-top: 4px; }
 .lightzones .seg { margin-bottom: 4px; }
 .lightzones > span { font-size: 13px; }
+.vision { margin-top: 8px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; }
+.vision .msg { margin: 6px 0 0; }
+.vision img { width: 100%; margin-top: 6px; border-radius: 6px; }
 .lightcolor { width: 34px; height: 30px; padding: 0 2px; border: 1px solid var(--line, #8884); border-radius: 6px; background: none; cursor: pointer; }
 .camview {
   position: relative; aspect-ratio: 4 / 3; background: var(--map-unknown); border-radius: 8px; overflow: hidden;
@@ -189,6 +192,7 @@ label.slider input { flex: 1; accent-color: var(--accent); }
   <span class="pill"><span class="dot" id="dPico"></span>Drive</span>
   <span class="pill"><span class="dot" id="dLidar"></span>Lidar</span>
   <span class="pill" title="Pack voltage and approximate charge (LiFePO4)"><span class="dot" id="dBatt"></span>Battery <b id="tBatt">—</b></span>
+  <span class="pill" id="pClaude" hidden title="Claude vision: is the Claude API reachable with the robot's key?"><span class="dot" id="dClaude"></span>Claude <b id="tClaude">—</b></span>
   <span class="pill" id="pCharger" title="Voltage at the charge port (charger side of its diode)"><span class="dot" id="dCharger"></span>Charger <b id="tCharger">—</b></span>
   <span class="pill" id="pIMU" title="IMU on the sensor board, used as the robot's gyro"><span class="dot" id="dIMU"></span>IMU <b id="tIMU">—</b></span>
   <span class="pill" title="Sensor/LED board: temperature and humidity (DHT11)"><span class="dot" id="dIO"></span>IO <b id="tIO">—</b></span>
@@ -282,6 +286,14 @@ label.slider input { flex: 1; accent-color: var(--accent); }
       </div>
       <div class="msg" style="margin-top:6px">Drag the joystick (up/down drives, left/right turns), or use the arrow keys / WASD. The robot slows near obstacles and stops 12 cm short.</div>
       <div class="msg" id="guardMsg" style="margin-top:0"></div>
+      <div class="vision" id="visionBox" hidden>
+        <div class="row" style="align-items:center">
+          <b>Claude vision</b>
+          <button id="askClaude" style="margin-left:auto" title="Send one camera picture to Claude and show what it sees">Ask Claude</button>
+        </div>
+        <div class="msg" id="visionText"></div>
+        <img id="visionImg" alt="The picture Claude looked at" hidden>
+      </div>
       <button id="guardOverride" style="width:100%; margin-top:6px" title="Joystick only, at a reduced speed. Turns itself off after 20 s without driving.">Override obstacle protection</button>
     </section>
 
@@ -385,6 +397,34 @@ function setDot(id, cls) { $(id).className = 'dot ' + cls; }
 const serviceOff = (id) => !!(state && state.services || []).find((s) => s.id === id && s.on === false);
 
 // One row per service, built once; polls only update them, so a click isn't lost to a rebuild.
+let visionShown = null;
+function showVision(st) {
+  const on = (st.services || []).some((s) => s.id === 'claude' && s.on === true);
+  const cs = st.vision_status;
+  $('pClaude').hidden = !on;
+  $('tClaude').textContent = !cs ? 'starting' : cs;
+  setDot('dClaude', cs === 'connected' ? 'ok' : !cs || cs === 'checking' ? 'busy' : 'bad');
+  const v = st.vision;
+  $('visionBox').hidden = !on && !v;
+  $('askClaude').hidden = !on;
+  $('askClaude').disabled = !!v && v.status === 'asking';
+  if (!v) { $('visionText').textContent = 'Asks Claude what the front camera shows (also after a crash).'; return; }
+  const when = new Date(v.time * 1000).toLocaleTimeString();
+  const why = v.trigger === 'crash' ? 'After a crash' : 'Asked';
+  $('visionText').textContent = v.status === 'asking' ? `${why}: looking…` : `${why} at ${when}: ${v.text}`;
+  $('visionText').classList.toggle('err', v.status === 'error' || v.trigger === 'crash');
+  const key = `${v.time}`;
+  if (v.has_image && v.status !== 'asking' && visionShown !== key) {
+    visionShown = key;
+    $('visionImg').src = `/api/vision/latest.jpg?t=${key}`;
+    $('visionImg').hidden = false;
+  }
+}
+$('askClaude').onclick = () => api('/api/vision/ask', {}).then((r) => {
+  if (!r.success) $('visionText').textContent = r.message;
+  pollState();
+}).catch(() => {});
+
 function showServices(services) {
   const rows = $('svcRows');
   if (rows.children.length !== services.length) {
@@ -534,6 +574,7 @@ async function pollState() {
     showIMU(state.imu || '');
     const g = state.guard || '';
     showServices(state.services || []);
+    showVision(state);
     showCrashes(state.crash_marks || []);
     const overridden = g.startsWith('override');
     $('guardMsg').textContent = /stopped|slowing|waiting|override|crash/.test(g) ? 'Guard: ' + g : '';

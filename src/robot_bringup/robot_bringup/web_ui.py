@@ -103,6 +103,8 @@ SERVICE_MENU = {
     'crash': ('Crash detection', 'Stops the robot after a hit and marks the spot on the map. Needs the IMU.', '/services/crash/set_enabled'),
     'foxglove': ('Foxglove', 'Remote viewing on port 8765. Off: Foxglove can\'t connect.', '/services/foxglove/set_enabled'),
     'rosbridge': ('rosbridge', 'Web and phone ROS clients on port 9090.', '/services/rosbridge/set_enabled'),
+    'claude': ('Claude vision', 'After a crash, or with Ask Claude, sends one camera picture to the Claude API '
+               'and shows what it sees. Needs an API key. Off by default.', '/services/claude/set_enabled'),
 }
 COSTMAP_TOPICS = {'global': '/global_costmap/costmap', 'local': '/local_costmap/costmap'}
 
@@ -221,6 +223,12 @@ class WebUI(Node):
         self.mask_load = self.create_client(LoadMap, '/filter_mask_server/load_map', callback_group=group)
         self.create_subscription(String, '/services/status', self.on_services, latched)
         self.create_subscription(String, '/cameras/status', self.on_cameras_status, latched)
+        # Claude vision (claude_vision.py): latest report, and Ask Claude.
+        self.vision, self.vision_status = None, None
+        self.create_subscription(String, '/vision/report', self.on_vision, latched)
+        self.create_subscription(String, '/vision/status', lambda m: setattr(self, 'vision_status', m.data), latched)
+        self.vision_client = self.create_client(Trigger, '/vision/describe', callback_group=group)
+        self.vision_dir = os.path.expanduser('~/robot_ws/vision_log')
 
         # Manual / calibration motion: published only while fresh, so Nav2 is not fought.
         self.motion_manual = False
@@ -674,6 +682,38 @@ class WebUI(Node):
             self.stack('stop')
             self.touch('stopped after idle timeout')
 
+    def on_vision(self, msg):
+        try:
+            self.vision = json.loads(msg.data)
+        except ValueError:
+            pass
+
+    def vision_payload(self):
+        if not self.vision:
+            return None
+        v = dict(self.vision)
+        v['has_image'] = bool(v.pop('image', ''))
+        return v
+
+    def vision_image(self):
+        """JPEG of the latest look, only from the vision log folder."""
+        path = (self.vision or {}).get('image', '')
+        if not path or os.path.dirname(os.path.realpath(path)) != os.path.realpath(self.vision_dir):
+            return None
+        try:
+            with open(path, 'rb') as f:
+                return f.read()
+        except OSError:
+            return None
+
+    def ask_claude(self):
+        if not self.vision_client.wait_for_service(timeout_sec=1.0):
+            return {'success': False, 'message': 'Claude vision is off: switch it on in Services'}
+        res = wait_future(self.vision_client.call_async(Trigger.Request()), 10.0)
+        if res is None:
+            return {'success': False, 'message': 'timed out'}
+        return {'success': res.success, 'message': res.message}
+
     def stack(self, action):
         if action in ('stop', 'restart'):
             self.test_abort.set()
@@ -855,6 +895,8 @@ class WebUI(Node):
             # Latched, so it outlives the driver: only believed while the driver is there.
             'imu': self.imu_status if self.count_publishers('/imu/data') else '',
             'services': self.services_payload(),
+            'vision': self.vision_payload(),
+            'vision_status': self.vision_status if self.service_on.get('claude') else None,
             'crash_marks': self.crash_marks,
             'localized': world == 'map',
             'goal': self.goal,
@@ -1337,6 +1379,9 @@ def make_handler(node, web_dir):
                 self.send(200, png, 'image/png') if png else self.send(404, {'error': 'no such map'})
             elif path == '/api/state':
                 self.send(200, node.state())
+            elif path == '/api/vision/latest.jpg':
+                jpg = node.vision_image()
+                self.send(200, jpg, 'image/jpeg') if jpg else self.send(404, {'error': 'no picture yet'})
             elif path == '/api/map':
                 body = node.map_payload()
                 self.send(200, body) if body else self.send(404, {'error': 'no map'})
@@ -1441,6 +1486,8 @@ def make_handler(node, web_dir):
                     self.send(200, {'ok': True})
                 elif path == '/api/calib':
                     self.send(200, node.apply_calib(body))
+                elif path == '/api/vision/ask':
+                    self.send(200, node.ask_claude())
                 elif path == '/api/lights':
                     if 'color' in body:
                         self.send(200, node.set_light_color(body.get('zone'), body.get('color')))

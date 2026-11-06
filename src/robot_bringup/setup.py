@@ -36,6 +36,7 @@ setup(
             'crash_monitor = robot_bringup.crash_monitor:main',
             'battery_standby = robot_bringup.battery_standby:main',
             'pico_io = robot_bringup.pico_io:main',
+            'claude_vision = robot_bringup.claude_vision:main',
         ],
     },
 )
