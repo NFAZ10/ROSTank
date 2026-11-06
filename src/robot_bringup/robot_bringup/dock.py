@@ -20,6 +20,11 @@ the dock's magnetic charge plug; the robot's plug is at the front, under the cam
   settling   still; the charger should connect within settle_time
   backing    missed: reverse backoff metres and try again, max_tries in all
 /robot/undock (Trigger): reverse backoff metres off the dock (through drive_guard).
+  Plugged in, the robot's own map pose fixes the dock: on undock (before moving) and when a
+  plug-in succeeds, the parking spot is saved for the map (as check_dock does), so go_dock
+  can drive straight back to it. Once plugged in, navigation is switched off (stop_when_docked:
+  the lidar and Nav2 idle while it charges); a mapping run keeps going, as stopping it would
+  lose the unsaved map.
 /robot/learn_dock (Trigger, on the charger): measure where the tag and the front range are
   when plugged in and save it (geometry_file); used from then on. Re-run after moving or
   rebuilding the dock.
@@ -167,6 +172,7 @@ class Dock(Node):
         self.auto_idle_s = p('auto_idle_s', 300.0)
         self.auto_retry_s = p('auto_retry_s', 600.0)
         self.dock_headlights = p('dock_headlights', 'on')  # '' = leave them alone
+        self.stop_when_docked = p('stop_when_docked', True)
         self.map_dir = os.path.expanduser(p('map_dir', '~/robot_ws/maps'))
         calib = load_calib(os.path.join(get_package_share_directory('robot_bringup'),
                                         'config', 'calibration', 'left.yaml'))
@@ -198,6 +204,7 @@ class Dock(Node):
         self.active = None
         self.auto_block_until, self.auto_pending = 0.0, ''
         self.stop_exploring = self.create_client(Trigger, '/robot/stop_exploring')
+        self.nav_stop = self.create_client(Trigger, '/robot/stop')
         self.nav = ActionClient(self, NavigateToPose, '/navigate_to_pose')
         self.tf = Buffer()
         TransformListener(self.tf, self)
@@ -394,6 +401,39 @@ class Dock(Node):
             return os.path.join(self.map_dir, '.pending_dock.json')
         return None
 
+    def docked_spot(self, base_x, base_y, base_yaw):
+        """Robot plugged in at (x, y, yaw) in map -> parking spot approach metres from the tag."""
+        back = self.approach - self.docked_distance  # the tag is docked_distance ahead now
+        return base_x - back * math.cos(base_yaw), base_y - back * math.sin(base_yaw), base_yaw
+
+    def remember_docked(self):
+        """Save the parking spot from the docked pose; a short note for the status, '' if not saved."""
+        if not self.charger:
+            return ''
+        if not self.dock_file():
+            return ' (no map running: the dock spot was not saved)'
+        try:
+            t = self.tf.lookup_transform('map', 'base_link', Time()).transform
+        except Exception:  # noqa: BLE001 - not localized
+            return ' (not on a map yet: the dock spot was not saved)'
+        x, y, yaw = self.docked_spot(t.translation.x, t.translation.y, yaw_of(t.rotation))
+        with open(self.dock_file(), 'w') as f:
+            json.dump({'x': round(float(x), 3), 'y': round(float(y), 3), 'yaw': round(yaw, 4)}, f)
+        self.get_logger().info(f'dock spot saved from the docked pose: {x:.2f}, {y:.2f}, '
+                               f'{math.degrees(yaw):.0f} deg -> {self.dock_file()}')
+        return ', dock spot saved for this map' if self.mode == 'navigating' else ', dock spot saved (kept with the map)'
+
+    def stop_map(self):
+        """Plugged in: navigation off (after the dock spot is saved); mapping left running."""
+        if not self.stop_when_docked:
+            return ''
+        if self.mode == 'navigating' and self.nav_stop.service_is_ready():
+            self.nav_stop.call_async(Trigger.Request())
+            return ', navigation off'
+        if self.mode in ('mapping', 'exploring'):
+            return ', still mapping: save the map'
+        return ''
+
     def parking_spot(self, T):
         """Tag pose (map) -> (x, y, yaw) approach metres in front of it, facing it; also saved."""
         n = T[:2, 2] / max(np.linalg.norm(T[:2, 2]), 1e-6)  # tag z axis points out of its face
@@ -469,8 +509,9 @@ class Dock(Node):
         if self.odom is None:
             response.success, response.message = False, 'no /odom yet'
             return response
+        note = self.remember_docked()
         self.set_state('undocking')
-        self.say('backing off the dock')
+        self.say('backing off the dock' + note)
         response.success, response.message = True, 'undocking'
         return response
 
@@ -607,7 +648,7 @@ class Dock(Node):
         now = time.monotonic()
         elapsed = now - self.state_start
         if self.charger and self.state in ('aligning', 'creeping', 'settling'):
-            return self.finish('docked: charging')
+            return self.finish('docked: charging' + self.remember_docked() + self.stop_map())
         if self.state == 'aligning':
             if self.frame is None:  # the camera starts on demand
                 if elapsed > 45.0:

@@ -1,3 +1,4 @@
+import pytest
 import time
 
 from robot_bringup.dock import Dock
@@ -70,3 +71,19 @@ def test_exploring_stops_the_explorer_first(tmp_path):
     d.mode = 'mapping'
     d.auto_dock()
     assert d.started
+
+
+def test_docked_pose_gives_the_parking_spot(tmp_path):
+    import math
+    d = dock(tmp_path)
+    d.approach, d.docked_distance = 0.45, 0.277
+    x, y, yaw = d.docked_spot(1.0, 2.0, math.pi / 2)  # docked facing +y
+    assert (x, y, yaw) == pytest.approx((1.0, 2.0 - 0.173, math.pi / 2))
+
+
+def test_docked_turns_navigation_off_but_not_mapping(tmp_path):
+    d = dock(tmp_path)
+    d.stop_when_docked, d.nav_stop = True, Ready()
+    assert d.stop_map() == ', navigation off' and d.nav_stop.calls == 1
+    d.mode = 'mapping'
+    assert 'save the map' in d.stop_map() and d.nav_stop.calls == 1
