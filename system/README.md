@@ -4,7 +4,7 @@ Copies of what lives outside the workspace, to rebuild the robot on a fresh Jets
 
 ```bash
 sudo cp systemd/*.service /etc/systemd/system/ && sudo systemctl daemon-reload
-sudo systemctl enable --now robot.service robot-web.service
+sudo systemctl enable --now robot.service robot-web.service robot-battery.service
 sudo cp udev/*.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger
 sudo install -m 440 sudoers/90-nfazio-nopasswd /etc/sudoers.d/   # passwordless sudo (web UI stack control)
 ```

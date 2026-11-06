@@ -17,16 +17,8 @@ def generate_launch_description():
             remappings=[('odom', 'wheel/odom'), ('cmd_vel', 'cmd_vel_safe')],
             output='screen',
         ),
-        # Sensor + LED Pico: front range, temperature/humidity, headlights / tail / top lights.
-        Node(
-            package='robot_bringup',
-            executable='pico_io',
-            parameters=[os.path.join(share, 'config', 'pico_io.yaml')],
-            output='screen',
-        ),
-        # APM flight controller as an IMU, read only. Waits quietly if it isn't plugged in.
-        Node(package='robot_bringup', executable='apm_imu', output='screen'),
         # Low-battery warning and clean power-off before the packs go flat (reads /battery).
+        # Moves to battery.launch.py once robot-battery.service is installed.
         Node(package='robot_bringup', executable='battery_guard', output='screen'),
         # Every /cmd_vel (web UI, CLI, teleop, Nav2) -> obstacle check -> /cmd_vel_safe -> pico_bridge.
         Node(package='robot_bringup', executable='drive_guard', output='screen'),

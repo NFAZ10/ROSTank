@@ -33,9 +33,9 @@ ekf_filter_node:
     odom1_differential: true
     odom1_queue_size: 5
 
-    # imu0 = /imu/apm (apm_imu.py): the yaw rate the tracks can't give. Sign checked by hand, 2026-11-03:
-    # left turn = positive. Its variance is ~500x below the tracks', so it effectively sets the turn rate.
-    imu0: /imu/apm
+    # imu0 = /imu/data (mpu_imu.py): the yaw rate the tracks can't give. Left turn = positive.
+    # Its variance is ~500x below the tracks', so it effectively sets the turn rate.
+    imu0: /imu/data
     imu0_config: [false, false, false,
                   false, false, false,
                   false, false, false,

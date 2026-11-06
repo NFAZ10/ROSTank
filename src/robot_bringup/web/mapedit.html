@@ -120,7 +120,7 @@ async function load(name) {
     }
     kctx.putImageData(k, 0, 0);
     undo = []; dirty = false; refresh(); fit();
-    note(info.in_use ? 'Navigation is using this map: restart it after saving to load the edits.' : '');
+    note(info.in_use ? 'Navigation is using this map: saved edits apply straight away.' : '');
     history.replaceState(null, '', `?map=${encodeURIComponent(name)}`);
   } catch (e) { note(e.message, true); }
 }

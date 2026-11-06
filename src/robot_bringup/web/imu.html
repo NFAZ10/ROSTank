@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Robot IMU</title>
+<style>
+/* Same tokens as index.html, plus one colour per axis (the same axis keeps its colour in both charts). */
+:root {
+  --bg: #f3f4f1; --panel: #ffffff; --ink: #1d2320; --muted: #66706a; --line: #dde1dc;
+  --accent: #1f7a5a; --danger: #c2372b; --warn: #b7791f; --grid: rgba(0,0,0,.07); --axis: rgba(0,0,0,.28);
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a;
+  --radius: 10px; --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121614; --panel: #1b201d; --ink: #e6ebe7; --muted: #95a09a; --line: #2c332f;
+    --accent: #3fb58a; --danger: #ef6b5e; --warn: #e3a948; --grid: rgba(255,255,255,.06); --axis: rgba(255,255,255,.3);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.4 var(--font); }
+header {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+  padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+}
+header h1 { font-size: 17px; margin: 0 8px 0 0; }
+header a { color: var(--muted); font-size: 14px; text-decoration: none; }
+header a:hover { color: var(--ink); }
+.pill { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.pill b { color: var(--ink); font-weight: 600; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--line); }
+.dot.ok { background: var(--accent); } .dot.bad { background: var(--danger); }
+main { display: grid; gap: 14px; padding: 14px 16px; max-width: 1100px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; min-width: 0; }
+.card h2 { font-size: 15px; margin: 0; }
+.card h2 small { font-weight: 400; color: var(--muted); font-size: 13px; }
+.top { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; margin-bottom: 8px; }
+.legend { display: flex; gap: 14px; margin-left: auto; font-size: 13px; color: var(--muted); }
+.legend i { display: inline-block; width: 14px; height: 2px; margin-right: 5px; vertical-align: 4px; border-radius: 1px; }
+.chartbox { position: relative; height: 240px; }
+canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.tip {
+  position: absolute; top: 6px; pointer-events: none; padding: 6px 8px; font-size: 12px; white-space: nowrap;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 1px 4px rgba(0,0,0,.18);
+  font-variant-numeric: tabular-nums;
+}
+.tip i { display: inline-block; width: 8px; height: 8px; margin-right: 5px; border-radius: 2px; }
+.tip b { font-weight: 600; float: right; margin-left: 14px; }
+table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; font-variant-numeric: tabular-nums; }
+th, td { padding: 3px 8px; text-align: right; border-top: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 500; }
+th:first-child, td:first-child { text-align: left; }
+td:first-child i { display: inline-block; width: 14px; height: 2px; margin-right: 6px; vertical-align: 4px; border-radius: 1px; }
+.msg { font-size: 13px; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>IMU</h1>
+  <a href="/">← Robot</a>
+  <span class="pill"><span class="dot" id="dot"></span><b id="status">…</b></span>
+  <span class="msg" id="note"></span>
+</header>
+<main id="charts"></main>
+
+<script>
+const WINDOW = 30;  // seconds shown
+const PAD = { left: 44, right: 118, top: 8, bottom: 22 };
+const AXES = ['--s1', '--s2', '--s3'];
+const CHARTS = [
+  { id: 'gyro', title: 'Rotation rate', unit: '°/s', first: 1, minTop: 30, names: ['Roll', 'Pitch', 'Yaw'], note: 'yaw + = turning left' },
+  { id: 'accel', title: 'Acceleration', unit: 'm/s²', first: 4, minTop: 12, names: ['Forward', 'Left', 'Up'], note: 'not calibrated; gravity reads on Up' },
+];
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+// ---------- chart ----------
+function niceTop(peak, minTop) {
+  const need = Math.max(peak, minTop);
+  const mag = Math.pow(10, Math.floor(Math.log10(need)));
+  for (const m of [1, 1.5, 2, 3, 4, 5, 6, 8, 10]) if (m * mag >= need) return m * mag;
+  return 10 * mag;
+}
+
+// Labels sit at the line ends; nudge them apart when lines run together.
+function spreadLabels(ys, gap, lo, hi) {
+  const order = ys.map((y, i) => ({ y, i })).sort((a, b) => a.y - b.y);
+  for (let k = 1; k < order.length; k++) order[k].y = Math.max(order[k].y, order[k - 1].y + gap);
+  const over = order.length ? order[order.length - 1].y - hi : 0;
+  if (over > 0) for (let k = order.length - 1; k >= 0; k--) {
+    order[k].y = k === order.length - 1 ? hi : Math.min(order[k].y, order[k + 1].y - gap);
+  }
+  const out = [];
+  order.forEach((o) => { out[o.i] = Math.max(o.y, lo); });
+  return out;
+}
+
+function formatValue(v) {
+  const text = Math.abs(v).toFixed(Math.abs(v) >= 100 ? 0 : 1);
+  return Number(text) === 0 ? text : (v > 0 ? '+' : '−') + text;
+}
+
+function nearest(samples, t) {
+  let lo = 0, hi = samples.length - 1;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (samples[mid][0] < t) lo = mid + 1; else hi = mid; }
+  if (lo > 0 && t - samples[lo - 1][0] < samples[lo][0] - t) lo--;
+  return samples[lo];
+}
+
+function drawChart(g, W, H, spec, samples, now, hoverT, colors) {
+  const padL = PAD.left, padT = PAD.top;
+  const plotR = W - PAD.right, plotB = H - PAD.bottom;
+  g.clearRect(0, 0, W, H);
+  const seen = samples.filter((s) => now - s[0] <= WINDOW);
+  let peak = 0;
+  for (const s of seen) for (let k = 0; k < 3; k++) peak = Math.max(peak, Math.abs(s[spec.first + k]));
+  const top = niceTop(peak, spec.minTop), step = top / 2;
+  const x = (t) => padL + (plotR - padL) * (1 - (now - t) / WINDOW);
+  const y = (v) => padT + (plotB - padT) * (top - v) / (2 * top);
+
+  g.font = `11px ${colors.font}`; g.textAlign = 'right'; g.textBaseline = 'middle';
+  for (let k = -2; k <= 2; k++) {
+    const v = k * step;
+    g.strokeStyle = k === 0 ? colors.axis : colors.grid; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(padL, y(v)); g.lineTo(plotR, y(v)); g.stroke();
+    g.fillStyle = colors.muted; g.fillText(k ? formatValue(v).replace('.0', '') : '0', padL - 6, y(v));
+  }
+  g.textAlign = 'center'; g.textBaseline = 'top';
+  for (let s = 0; s <= WINDOW; s += 5) g.fillText(s ? `−${s} s` : 'now', x(now - s), plotB + 6);
+  if (seen.length < 2) return;
+
+  g.save(); g.beginPath(); g.rect(padL, padT, plotR - padL, plotB - padT); g.clip();
+  g.lineJoin = 'round'; g.lineWidth = 2;
+  for (let k = 0; k < 3; k++) {
+    g.strokeStyle = colors.series[k];
+    g.beginPath();
+    seen.forEach((s, i) => { const px = x(s[0]), py = y(s[spec.first + k]); if (i) g.lineTo(px, py); else g.moveTo(px, py); });
+    g.stroke();
+  }
+  g.restore();
+
+  // Line-end labels: ink text with a coloured mark beside it, so identity is never colour alone.
+  const last = seen[seen.length - 1];
+  const ends = [0, 1, 2].map((k) => y(last[spec.first + k]));
+  const labels = spreadLabels(ends, 15, padT + 6, plotB - 6);
+  g.textAlign = 'left'; g.textBaseline = 'middle'; g.font = `12px ${colors.font}`;
+  labels.forEach((ly, k) => {
+    g.strokeStyle = colors.series[k]; g.lineWidth = 2;
+    g.beginPath(); g.moveTo(plotR + 3, ly); g.lineTo(plotR + 11, ly); g.stroke();
+    g.fillStyle = colors.ink; g.fillText(`${spec.names[k]} ${formatValue(last[spec.first + k])}`, plotR + 14, ly);
+  });
+
+  if (hoverT !== null) {
+    const s = nearest(seen, hoverT), px = x(s[0]);
+    g.strokeStyle = colors.axis; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(px, padT); g.lineTo(px, plotB); g.stroke();
+    for (let k = 0; k < 3; k++) {
+      g.beginPath(); g.arc(px, y(s[spec.first + k]), 4, 0, 2 * Math.PI);
+      g.fillStyle = colors.series[k]; g.fill(); g.strokeStyle = colors.surface; g.lineWidth = 2; g.stroke();
+    }
+    return { sample: s, px };
+  }
+  return null;
+}
+
+// ---------- page ----------
+const $ = (id) => document.getElementById(id);
+let samples = [], seq = 0, now = 0, hoverT = null, gotAt = 0;
+
+$('charts').innerHTML = CHARTS.map((c) => `
+  <section class="card">
+    <div class="top">
+      <h2>${c.title} <small>${c.unit}, ${c.note}</small></h2>
+      <div class="legend">${c.names.map((n, k) => `<span><i style="background:var(${AXES[k]})"></i>${n}</span>`).join('')}</div>
+    </div>
+    <div class="chartbox"><canvas id="${c.id}"></canvas><div class="tip" id="${c.id}Tip" hidden></div></div>
+    <table><thead><tr><th>Axis (${c.unit})</th><th>Now</th><th>Peak, last ${WINDOW} s</th></tr></thead>
+      <tbody>${c.names.map((n, k) => `<tr><td><i style="background:var(${AXES[k]})"></i>${n}</td><td id="${c.id}Now${k}">—</td><td id="${c.id}Peak${k}">—</td></tr>`).join('')}</tbody></table>
+  </section>`).join('');
+
+function palette() {
+  return { series: AXES.map(css), ink: css('--ink'), muted: css('--muted'), grid: css('--grid'), axis: css('--axis'),
+           surface: css('--panel'), font: css('--font') };
+}
+
+function plotTime(canvas, clientX) {
+  const r = canvas.getBoundingClientRect();
+  const t = (clientX - r.left - PAD.left) / (r.width - PAD.left - PAD.right);
+  return t < 0 || t > 1 ? null : now - WINDOW * (1 - t);
+}
+
+CHARTS.forEach((c) => {
+  const canvas = $(c.id);
+  canvas.addEventListener('pointermove', (e) => { hoverT = plotTime(canvas, e.clientX); });
+  canvas.addEventListener('pointerdown', (e) => { hoverT = plotTime(canvas, e.clientX); });
+  canvas.addEventListener('pointerleave', () => { hoverT = null; });
+});
+
+function render() {
+  const colors = palette(), dpr = window.devicePixelRatio || 1;
+  CHARTS.forEach((c) => {
+    const canvas = $(c.id), W = canvas.clientWidth, H = canvas.clientHeight;
+    if (canvas.width !== W * dpr || canvas.height !== H * dpr) { canvas.width = W * dpr; canvas.height = H * dpr; }
+    const g = canvas.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const hit = drawChart(g, W, H, c, samples, now, hoverT, colors), tip = $(c.id + 'Tip');
+    tip.hidden = !hit;
+    if (hit) {
+      tip.innerHTML = `<div>${(now - hit.sample[0]).toFixed(1)} s ago</div>` + c.names.map((n, k) =>
+        `<div><i style="background:var(${AXES[k]})"></i>${n}<b>${formatValue(hit.sample[c.first + k])}</b></div>`).join('');
+      tip.style.left = `${hit.px > W / 2 ? hit.px - tip.offsetWidth - 10 : hit.px + 10}px`;
+    }
+  });
+  requestAnimationFrame(render);
+}
+
+function showTable() {
+  const seen = samples.filter((s) => now - s[0] <= WINDOW);
+  CHARTS.forEach((c) => c.names.forEach((n, k) => {
+    const col = c.first + k, latest = seen[seen.length - 1];
+    let peak = null;
+    for (const s of seen) if (peak === null || Math.abs(s[col]) > Math.abs(peak)) peak = s[col];
+    $(`${c.id}Now${k}`).textContent = latest ? formatValue(latest[col]) : '—';
+    $(`${c.id}Peak${k}`).textContent = peak === null ? '—' : formatValue(peak);
+  }));
+}
+
+async function poll() {
+  if (document.visibilityState !== 'visible') return;
+  try {
+    const r = await (await fetch(`/api/imu?since=${seq}`)).json();
+    now = r.now;
+    samples = samples.concat(r.samples).filter((s) => now - s[0] <= WINDOW + 1);
+    seq = r.seq;
+    if (r.samples.length) gotAt = performance.now();
+    const live = r.ok && performance.now() - gotAt < 2000;
+    $('dot').className = 'dot ' + (live ? 'ok' : 'bad');
+    $('status').textContent = live ? 'receiving' : 'no data';
+    $('note').textContent = live ? (r.frame === 'robot' ? 'Axes are the robot\'s: forward, left, up.' : 'Showing the board\'s own axes: the robot\'s mount isn\'t known yet.')
+      : 'Is the stack running and the board plugged in? The chart continues when data returns.';
+    showTable();
+  } catch (e) {
+    $('dot').className = 'dot bad'; $('status').textContent = 'page offline'; $('note').textContent = '';
+  }
+}
+
+poll(); setInterval(poll, 200);
+requestAnimationFrame(render);
+</script>
+</body>
+</html>

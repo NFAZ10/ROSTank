@@ -69,6 +69,14 @@ class Cli(Node):
         m = self.latest(String, '/robot/nav_mode', 1.5, LATCHED)
         return m.data if m else 'off'
 
+    def stereo(self, state):
+        c = self.create_client(SetBool, '/depth/set_enabled')
+        if not c.wait_for_service(timeout_sec=5.0):
+            die('stereo is not responding (robot restart)')
+        future = c.call_async(SetBool.Request(data=state == 'on'))
+        self.spin_for(5.0, future.done)
+        print(future.result().message if future.done() else 'no answer from stereo')
+
     def guard(self, state):
         c = self.create_client(SetBool, '/drive_guard/override')
         if not c.wait_for_service(timeout_sec=5.0):
@@ -109,11 +117,11 @@ class Cli(Node):
             nonlocal cameras
             cameras = m.data
         self.create_subscription(String, '/cameras/status', on_cameras, LATCHED)
-        apm = None
-        def on_apm(m):
-            nonlocal apm
-            apm = m.data
-        self.create_subscription(String, '/apm/status', on_apm, LATCHED)
+        imu = None
+        def on_imu(m):
+            nonlocal imu
+            imu = m.data
+        self.create_subscription(String, '/imu/status', on_imu, LATCHED)
         batt = []
         self.create_subscription(BatteryState, '/battery', batt.append, 10)
         self.spin_for(0.5)  # discovery
@@ -127,7 +135,7 @@ class Cli(Node):
             note = '  (motor spins only while something uses it)' if t == '/scan' and hz == 0 else ''
             print(f'  {label[t]:<16} {hz:5.1f} Hz  {state}{note}')
         print(f'  {"cameras":<16} {cameras or "unknown"}')
-        print(f'  {"APM IMU":<16} {apm or "unknown"}')
+        print(f'  {"IMU":<16} {imu or "unknown"}')
         print(f'  {"nav mode":<16} {mode or "unknown"}' + (f'  on map "{map_name}"' if map_name else ''))
         print(f'  {"drive guard":<16} {guard or "not running"}')
         b = batt[-1] if batt else None
@@ -448,6 +456,8 @@ def main():
             node.turn(*f[:2]) if f else die('usage: robot turn <degrees> [rate rad/s]   (positive = left)')
         elif cmd == 'stop':
             node.stop()
+        elif cmd == 'stereo':
+            node.stereo(rest[0]) if rest and rest[0] in ('on', 'off') else die('usage: robot stereo off | on')
         elif cmd == 'guard':
             node.guard(rest[0]) if rest and rest[0] in ('on', 'off') else die('usage: robot guard off | on')
         elif cmd == 'goal':

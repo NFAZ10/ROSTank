@@ -20,6 +20,7 @@
   <exec_depend>rcl_interfaces</exec_depend>
   <exec_depend>robot_localization</exec_depend>
   <exec_depend>nav2_msgs</exec_depend>
+  <exec_depend>slam_toolbox</exec_depend>
   <exec_depend>rosbridge_server</exec_depend>
   <exec_depend>rosapi</exec_depend>
   <exec_depend>action_msgs</exec_depend>

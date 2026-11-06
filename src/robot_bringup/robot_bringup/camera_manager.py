@@ -6,6 +6,7 @@ left view runs the left camera, stereo_depth runs both, nobody leaves both off. 
 
 A camera takes about 20 s to come up (Argus open + NITROS negotiation, see cameras.launch.py),
 so it stays on for `linger` seconds after the last user. State is latched on /cameras/status.
+cameras/set_enabled (web UI Services menu) turns them all off whoever is asking; that survives restarts.
 """
 import os
 import signal
@@ -17,6 +18,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from std_msgs.msg import String
+from std_srvs.srv import SetBool
 
 SIDES = ('left', 'right')
 # Images only: viewers like Foxglove subscribe to camera_info by themselves, which needs no camera.
@@ -74,6 +76,9 @@ class CameraManager(Node):
     def __init__(self):
         super().__init__('camera_manager')
         self.linger = self.declare_parameter('linger', 30.0).value
+        self.disabled_file = os.path.expanduser(self.declare_parameter('disabled_file', '~/.robot_cameras_disabled').value)
+        self.enabled = not os.path.exists(self.disabled_file)
+        self.create_service(SetBool, 'cameras/set_enabled', self.on_set_enabled)
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.status_pub = self.create_publisher(String, '/cameras/status', latched)
         self.status = None
@@ -90,6 +95,19 @@ class CameraManager(Node):
         self.last_jpeg = {side: 0.0 for side in SIDES}
         self.create_timer(1.0, self.manage)
 
+    def on_set_enabled(self, req, res):
+        self.enabled = req.data
+        if self.enabled:
+            if os.path.exists(self.disabled_file):
+                os.remove(self.disabled_file)
+        else:
+            open(self.disabled_file, 'w').close()
+            self.last_camera = {side: 0.0 for side in SIDES}
+            self.last_jpeg = {side: 0.0 for side in SIDES}
+        self.manage()
+        res.success, res.message = True, 'cameras on' if self.enabled else 'cameras off'
+        return res
+
     def used(self, side, topics):
         own = (f'preview_resize_{side}', f'preview_jpeg_{side}', f'argus_{side}')
         return any(info.node_name not in own for topic in topics
@@ -98,14 +116,17 @@ class CameraManager(Node):
     def manage(self):
         now = time.monotonic()
         for side in SIDES:
-            if self.used(side, (JPEG_TOPIC,)):
+            if not self.enabled:
+                pass
+            elif self.used(side, (JPEG_TOPIC,)):
                 self.last_jpeg[side] = self.last_camera[side] = now
             elif self.used(side, CAMERA_TOPICS):
                 self.last_camera[side] = now
             self.cameras[side].update(now - self.last_camera[side] < self.linger and self.last_camera[side] > 0)
             self.jpegs[side].update(now - self.last_jpeg[side] < self.linger and self.last_jpeg[side] > 0)
-        text = ', '.join(f'{side} ' + ('off' if not self.cameras[side].running else
-                                       'on + jpeg' if self.jpegs[side].running else 'on') for side in SIDES)
+        text = 'disabled' if not self.enabled else ', '.join(
+            f'{side} ' + ('off' if not self.cameras[side].running else
+                          'on + jpeg' if self.jpegs[side].running else 'on') for side in SIDES)
         if text != self.status:
             self.status = text
             self.status_pub.publish(String(data=text))

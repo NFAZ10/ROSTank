@@ -14,6 +14,12 @@ case $BOARD in
   io)    SKETCH=pico_io;    PORT=/dev/pico_io; OTHER=/dev/pico ;;
   *) echo "usage: $0 [drive|io]" >&2; exit 2 ;;
 esac
+
+# robot-battery.service reads /dev/pico while the stack is down, and anything holding the port blocks the reset.
+if systemctl is-active -q robot-battery.service; then
+  sudo -n systemctl stop robot-battery.service
+  trap 'sudo -n systemctl start robot-battery.service' EXIT
+fi
 cd "$(dirname "$0")/$SKETCH"
 CLI=~/.local/bin/arduino-cli
 FQBN=${FQBN:-rp2040:rp2040:rpipico}

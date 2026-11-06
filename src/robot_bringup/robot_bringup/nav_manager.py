@@ -241,9 +241,10 @@ class NavManager(Node):
         return response
 
     def clear_pending_dock(self):
-        pending = os.path.join(self.map_dir, '.pending_dock.json')  # belongs to the previous mapping run
-        if os.path.exists(pending):
-            os.remove(pending)
+        for name in ('.pending_dock.json', '.pending_crash.json'):  # belong to the previous mapping run
+            pending = os.path.join(self.map_dir, name)
+            if os.path.exists(pending):
+                os.remove(pending)
 
     def on_start_exploring(self, request, response):
         if self.mode not in ('mapping', 'exploring'):
@@ -313,6 +314,9 @@ class NavManager(Node):
         pending = os.path.join(self.map_dir, '.pending_dock.json')  # dock seen while mapping (dock.py)
         if os.path.exists(pending):
             os.replace(pending, os.path.join(self.map_dir, name + '.dock.json'))
+        pending = os.path.join(self.map_dir, '.pending_crash.json')
+        if os.path.exists(pending):
+            os.replace(pending, os.path.join(self.map_dir, name + '.crash.json'))
         response.success, response.message = True, f'saved map "{name}"' + (' with its dock' if os.path.exists(
             os.path.join(self.map_dir, name + '.dock.json')) else '')
         self.get_logger().info(response.message)

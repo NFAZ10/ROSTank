@@ -27,6 +27,8 @@ from sensor_msgs.msg import BatteryState, JointState
 from std_msgs.msg import Float64MultiArray
 from tf2_ros import TransformBroadcaster
 
+from robot_bringup.battery_filter import BatteryFilter
+
 
 class PicoBridge(Node):
     def __init__(self):
@@ -48,7 +50,7 @@ class PicoBridge(Node):
         # Battery divider: 6.8k over 1.5k by default. battery_scale trims it against a multimeter.
         self.battery_divider = self.declare_parameter('battery_divider', (6800 + 1500) / 1500).value
         self.battery_scale = self.declare_parameter('battery_scale', 1.0).value
-        self.battery_hist = collections.deque()  # (monotonic time, volts)
+        self.battery_filter = BatteryFilter()
         self.battery_pub = self.create_publisher(BatteryState, 'battery', 10)
         # Calibration (web UI) changes these live.
         self.add_on_set_parameters_callback(self.on_params)
@@ -169,35 +171,9 @@ class PicoBridge(Node):
                 except ValueError:
                     pass
 
-    # LiFePO4 (4 cells) resting voltage -> charge. Under load it reads lower: a guide, not a gauge.
-    LFP_CURVE = ((12.0, 0.0), (12.8, 0.10), (12.9, 0.20), (13.0, 0.30), (13.1, 0.40),
-                 (13.2, 0.70), (13.3, 0.90), (13.6, 1.0))
-
     def on_battery(self, pin_volts):
-        now = time.monotonic()
-        msg = BatteryState()
+        msg = self.battery_filter.message(time.monotonic(), pin_volts, self.battery_divider, self.battery_scale)
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.power_supply_technology = BatteryState.POWER_SUPPLY_TECHNOLOGY_LIFE
-        msg.design_capacity = 12.0
-        if pin_volts < 1.5:  # under ~8.3 V at the pack: divider not connected (a floating pin reads ~0.7 V)
-            self.battery_hist.clear()
-            msg.present = False
-            msg.voltage = msg.percentage = float('nan')
-            self.battery_pub.publish(msg)
-            return
-        self.battery_hist.append((now, pin_volts * self.battery_divider * self.battery_scale))
-        while self.battery_hist and now - self.battery_hist[0][0] > 10.0:
-            self.battery_hist.popleft()
-        volts = sum(v for _, v in self.battery_hist) / len(self.battery_hist)
-        curve = self.LFP_CURVE
-        if volts <= curve[0][0]:
-            pct = 0.0
-        elif volts >= curve[-1][0]:
-            pct = 1.0
-        else:
-            (v0, p0), (v1, p1) = next((a, b) for a, b in zip(curve, curve[1:]) if a[0] <= volts <= b[0])
-            pct = p0 + (p1 - p0) * (volts - v0) / (v1 - v0)
-        msg.present, msg.voltage, msg.percentage = True, float(volts), float(pct)
         self.battery_pub.publish(msg)
 
     def publish_joints(self, now, left, right):

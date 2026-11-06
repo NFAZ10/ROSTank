@@ -1,7 +1,9 @@
 """Stereo depth from the two IMX219 previews, on demand (VPI stereo on the GPU).
 
 Runs only while something subscribes to one of its outputs (web UI depth view, Foxglove,
-`robot depth`, Nav2...), or while force_on is true; otherwise it holds no subscriptions.
+`robot depth`, drive_guard...), or while force_on is true; otherwise it holds no subscriptions.
+The depth/set_enabled service (web UI button, `robot stereo off`) turns it off whoever is asking,
+which also lets the cameras stop. That choice survives restarts; /depth/enabled is latched.
 
   in:  /left/preview/image, /right/preview/image   (640x480, from cameras.launch.py)
   out: /depth/image          sensor_msgs/Image 32FC1, metres, 0 = unknown
@@ -37,7 +39,10 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import CameraInfo, CompressedImage, Image, PointCloud2, PointField
+from std_msgs.msg import Bool
+from std_srvs.srv import SetBool
 from tf2_ros import Buffer, StaticTransformBroadcaster, TransformListener
 
 from robot_bringup.depth_obstacles import ObstacleGrid, depth_to_base, from_odom, select_band, to_odom
@@ -86,6 +91,12 @@ class StereoDepth(Node):
     def __init__(self):
         super().__init__('stereo_depth')
         self.force_on = self.declare_parameter('force_on', False).value
+        self.disabled_file = os.path.expanduser(self.declare_parameter('disabled_file', '~/.robot_stereo_disabled').value)
+        self.enabled = not os.path.exists(self.disabled_file)
+        self.enabled_pub = self.create_publisher(Bool, '/depth/enabled', QoSProfile(
+            depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.enabled_pub.publish(Bool(data=self.enabled))
+        self.create_service(SetBool, 'depth/set_enabled', self.on_set_enabled)
         self.max_disparity = self.declare_parameter('max_disparity', 128).value  # px at 640 wide: ~0.25 m nearest
         self.max_range = self.declare_parameter('max_range', 6.0).value          # m, beyond this = unknown
         self.max_pair_gap = self.declare_parameter('max_pair_gap', 0.035).value  # s; one frame at 30 fps
@@ -129,7 +140,21 @@ class StereoDepth(Node):
         self.create_timer(0.03, self.process)
 
     # ---------- on demand ----------
+    def on_set_enabled(self, req, res):
+        self.enabled = req.data
+        if self.enabled:
+            if os.path.exists(self.disabled_file):
+                os.remove(self.disabled_file)
+        else:
+            open(self.disabled_file, 'w').close()
+        self.enabled_pub.publish(Bool(data=self.enabled))
+        self.get_logger().info('stereo enabled' if self.enabled else 'stereo disabled')
+        res.success, res.message = True, 'stereo on' if self.enabled else 'stereo off'
+        return res
+
     def wanted(self):
+        if not self.enabled:
+            return False
         self.force_on = self.get_parameter('force_on').value
         return self.force_on or any(p.get_subscription_count() > 0 for p in
                                     (self.depth_pub, self.points_pub, self.preview_pub, self.obstacles_pub))

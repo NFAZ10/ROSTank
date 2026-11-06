@@ -1,3 +1,0 @@
-# APM flight controller used as a sensor board (robot_bringup/apm_imu.py) -> /dev/apm.
-# Replacing the board: put the new serial here (udevadm info -n /dev/ttyACM2 | grep SERIAL_SHORT).
-SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", ATTRS{idProduct}=="0010", ENV{ID_SERIAL_SHORT}=="64037333531351900132", SYMLINK+="apm", MODE="0666"

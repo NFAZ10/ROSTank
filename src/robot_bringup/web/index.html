@@ -36,6 +36,22 @@ header h1 { font-size: 17px; margin: 0 8px 0 0; letter-spacing: .01em; }
 .dot.ok { background: var(--accent); } .dot.bad { background: var(--danger); } .dot.busy { background: var(--warn); }
 .pill b { color: var(--ink); font-weight: 600; }
 header .estop { margin-left: auto; }
+.svcwrap { position: relative; }
+.svcwrap > button { padding: 5px 10px; font-size: 13px; }
+.svcmenu {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 20; width: min(360px, calc(100vw - 32px));
+  padding: 10px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: 0 4px 16px rgba(0,0,0,.2);
+}
+.svcrow { display: flex; align-items: flex-start; gap: 10px; padding: 7px 0; cursor: pointer; font-size: 14px; font-weight: 600; }
+.svcrow + .svcrow { border-top: 1px solid var(--line); }
+.svcrow input { width: 18px; height: 18px; margin: 1px 0 0; flex: none; accent-color: var(--accent); }
+.svcrow span span { display: block; font-size: 12.5px; font-weight: 400; color: var(--muted); }
+.crashmenu { left: auto; right: 0; font-size: 13px; }
+.crashrow { display: flex; align-items: center; gap: 8px; padding: 5px 0; }
+.crashrow + .crashrow { border-top: 1px solid var(--line); }
+.crashrow span { flex: 1; }
+.svcnote { margin: 8px 0 0; padding-top: 8px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--muted); }
 
 main { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 380px; grid-template-rows: minmax(0, 1fr); gap: 12px; padding: 12px 16px; }
 @media (max-width: 900px) {
@@ -169,7 +185,16 @@ label.slider input { flex: 1; accent-color: var(--accent); }
   <span class="pill"><span class="dot" id="dPico"></span>Drive</span>
   <span class="pill"><span class="dot" id="dLidar"></span>Lidar</span>
   <span class="pill" title="Pack voltage and approximate charge (LiFePO4)"><span class="dot" id="dBatt"></span>Battery <b id="tBatt">—</b></span>
+  <span class="pill" id="pIMU" title="IMU on the sensor board, used as the robot's gyro"><span class="dot" id="dIMU"></span>IMU <b id="tIMU">—</b></span>
   <span class="pill" title="Sensor/LED board: temperature and humidity (DHT11)"><span class="dot" id="dIO"></span>IO <b id="tIO">—</b></span>
+  <div class="svcwrap">
+    <button id="svcBtn" aria-expanded="false" aria-controls="svcMenu">Services ▾</button>
+    <div class="svcmenu" id="svcMenu" hidden>
+      <div id="svcRows"></div>
+      <div class="msg err" id="svcErr"></div>
+      <p class="svcnote">Choices stay after a restart. The drive, its guard and odometry always run. The lidar spins only when something uses it.</p>
+    </div>
+  </div>
   <button class="danger estop" id="estop">STOP</button>
 </header>
 
@@ -185,6 +210,10 @@ label.slider input { flex: 1; accent-color: var(--accent); }
       <button id="findBtn" data-nav="find_myself" hidden title="Work out where it is on the whole map from scratch, by turning on the spot">Find me</button>
       <span class="spacer"></span>
       <button id="costmapBtn" title="Show what Nav2 plans around: its global costmap, and the local one around the robot">Costmap</button>
+      <div class="svcwrap" id="crashWrap" hidden>
+        <button id="crashBtn" aria-expanded="false" title="Places the robot crashed: Nav2 plans around them">Crashes</button>
+        <div class="svcmenu crashmenu" id="crashMenu" hidden></div>
+      </div>
       <button id="follow" class="on" title="Keep the robot centred">Follow</button>
       <button id="zoomOut" aria-label="Zoom out">−</button>
       <button id="zoomIn" aria-label="Zoom in">+</button>
@@ -259,6 +288,7 @@ label.slider input { flex: 1; accent-color: var(--accent); }
       </div>
       <div class="links">
         <a href="/encoders">Encoders →<span>Live track counts and speeds, spin one track</span></a>
+        <a href="/imu">IMU →<span>Live gyro and accelerometer charts</span></a>
         <a href="/calibrate">Camera calibration →<span>Stereo checkerboard calibration</span></a>
         <a href="/mapedit">Map editor →<span>Clean up saved maps: paint walls, free space, unknown</span></a>
       </div>
@@ -326,10 +356,88 @@ let lastStraight = null, lastSpin = null, lastTestKey = '';
 
 function setDot(id, cls) { $(id).className = 'dot ' + cls; }
 
+const serviceOff = (id) => !!(state && state.services || []).find((s) => s.id === id && s.on === false);
+
+// One row per service, built once; polls only update them, so a click isn't lost to a rebuild.
+function showServices(services) {
+  const rows = $('svcRows');
+  if (rows.children.length !== services.length) {
+    rows.innerHTML = services.map((s) => `<label class="svcrow"><input type="checkbox" role="switch" data-svc="${s.id}">
+      <span>${s.label}<span>${s.help}</span></span></label>`).join('');
+  }
+  services.forEach((s) => {
+    const box = rows.querySelector(`[data-svc="${s.id}"]`);
+    if (box.dataset.busy) return;
+    box.checked = s.on === true;
+    box.disabled = s.on === null || s.on === undefined;
+  });
+}
+$('svcRows').addEventListener('change', async (e) => {
+  const box = e.target;
+  box.disabled = true; box.dataset.busy = '1'; $('svcErr').textContent = '';
+  try {
+    await api('/api/services/' + box.dataset.svc, { on: box.checked });
+  } catch (err) {
+    box.checked = !box.checked; $('svcErr').textContent = err.message;
+  }
+  delete box.dataset.busy; box.disabled = false;
+});
+// Crash marks: drawn on the map, listed under the Crashes button, removable if false or moved.
+function drawCrashes(px, dpr, W, H) {
+  const marks = state && state.frame === 'map' ? state.crash_marks || [] : [];
+  marks.forEach((m, i) => {
+    const r = 0.07;
+    ctx.strokeStyle = css('--danger'); ctx.lineWidth = 3 * px;
+    ctx.beginPath(); ctx.moveTo(m.x - r, m.y - r); ctx.lineTo(m.x + r, m.y + r);
+    ctx.moveTo(m.x - r, m.y + r); ctx.lineTo(m.x + r, m.y - r); ctx.stroke();
+    ctx.save(); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.font = '600 12px system-ui, sans-serif'; ctx.fillStyle = css('--ink'); ctx.textAlign = 'center';
+    ctx.fillText(String(i + 1), W / 2 + (m.x - view.x) * view.scale, H / 2 - (m.y - view.y) * view.scale - Math.max(12, r * view.scale + 4));
+    ctx.restore();
+  });
+}
+let crashKey = null;
+function showCrashes(marks) {
+  $('crashWrap').hidden = marks.length === 0;
+  if (!marks.length) closeCrashes();
+  $('crashBtn').textContent = `Crashes (${marks.length})`;
+  const key = JSON.stringify(marks);
+  if (key === crashKey) return;
+  crashKey = key;
+  $('crashMenu').innerHTML = marks.map((m, i) => `<div class="crashrow"><span><b>${i + 1}</b> · ${new Date(m.time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · ${m.jolt.toFixed(1)} m/s²</span>
+    <button data-x="${m.x}" data-y="${m.y}">Remove</button></div>`).join('') + (marks.length > 1 ? '<button id="crashAll" style="width:100%; margin-top:6px">Remove all</button>' : '');
+}
+function closeCrashes() { $('crashMenu').hidden = true; $('crashBtn').setAttribute('aria-expanded', 'false'); }
+$('crashBtn').addEventListener('click', () => {
+  const open = $('crashMenu').hidden;
+  $('crashMenu').hidden = !open; $('crashBtn').setAttribute('aria-expanded', String(open));
+});
+$('crashMenu').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (b) api('/api/crash/remove', b.id === 'crashAll' ? { } : { x: Number(b.dataset.x), y: Number(b.dataset.y) }).catch(() => {});
+});
+document.addEventListener('click', (e) => { if (!e.target.closest('#crashWrap')) closeCrashes(); });
+
+function closeServices() { $('svcMenu').hidden = true; $('svcBtn').setAttribute('aria-expanded', 'false'); }
+$('svcBtn').addEventListener('click', () => {
+  const open = $('svcMenu').hidden;
+  $('svcMenu').hidden = !open; $('svcBtn').setAttribute('aria-expanded', String(open));
+});
+document.addEventListener('click', (e) => { if (!e.target.closest('.svcwrap')) closeServices(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeServices(); });
+
+function showIMU(imu) {
+  if (serviceOff('imu')) { $('tIMU').textContent = 'off'; setDot('dIMU', ''); $('pIMU').title = 'Switched off in the Services menu'; return; }
+  const ok = imu === 'ok', booting = imu.startsWith('calibrating');
+  $('tIMU').textContent = ok ? 'connected' : booting ? 'starting' : state.stack === 'active' ? 'not connected' : '—';
+  setDot('dIMU', ok ? 'ok' : booting ? 'busy' : state.stack === 'active' ? 'bad' : '');
+  $('pIMU').title = 'IMU on the sensor board, used as the robot\'s gyro' + (imu ? `: ${imu}` : '');
+}
+
 function showIO(io) {
   const t = io.temp_ok ? `${io.temp.toFixed(0)}°C` + (io.humidity_ok ? ` · ${io.humidity.toFixed(0)}%` : '') : '';
   $('tIO').textContent = t || (io.connected ? 'on' : '—');
-  setDot('dIO', io.connected ? 'ok' : state.stack === 'active' ? 'bad' : '');
+  setDot('dIO', io.connected ? 'ok' : state.stack === 'active' && !serviceOff('sensors') ? 'bad' : '');
   document.querySelectorAll('[data-head]').forEach((b) => {
     b.classList.toggle('on', b.dataset.head === io.headlights);
     b.disabled = !io.connected;
@@ -364,15 +472,18 @@ async function pollState() {
     $('tBatt').textContent = b.present ? `${b.voltage.toFixed(1)} V · ${b.percent}%` : '—';
     setDot('dBatt', !b.present ? '' : /critical|shutting/.test(b.status) ? 'bad' : /low/.test(b.status) ? 'busy' : 'ok');
     showIO(state.io || {});
+    showIMU(state.imu || '');
     const g = state.guard || '';
+    showServices(state.services || []);
+    showCrashes(state.crash_marks || []);
     const overridden = g.startsWith('override');
-    $('guardMsg').textContent = /stopped|slowing|waiting|override/.test(g) ? 'Guard: ' + g : '';
+    $('guardMsg').textContent = /stopped|slowing|waiting|override|crash/.test(g) ? 'Guard: ' + g : '';
     $('guardMsg').classList.toggle('err', g.startsWith('stopped') || overridden);
     $('guardOverride').classList.toggle('danger', overridden);
     $('guardOverride').textContent = overridden ? 'Turn protection back on' : 'Override obstacle protection';
   } catch (e) {
     $('tStack').textContent = 'page offline'; setDot('dStack', 'bad');
-    $('tMode').textContent = '—'; setDot('dMode', ''); setDot('dPico', ''); setDot('dLidar', '');
+    $('tMode').textContent = '—'; setDot('dMode', ''); setDot('dPico', ''); setDot('dLidar', ''); setDot('dIMU', '');
   }
 }
 
@@ -510,6 +621,7 @@ function draw() {
   }
 
   drawCostmaps();
+  drawCrashes(px, dpr, W, H);
 
   // 1 m grid
   const tl = toWorld(0, 0), br = toWorld(W, H);
@@ -753,7 +865,7 @@ function camStart() {
     img.removeAttribute('src'); $('camMsg').textContent = camSide ? 'Paused' : 'Camera off';
     return;
   }
-  $('camMsg').textContent = 'Starting camera, about 20 s…';
+  $('camMsg').textContent = serviceOff('cameras') ? 'Cameras are off (Services menu)' : camSide === 'depth' && serviceOff('stereo') ? 'Stereo is off (Services menu)' : 'Starting camera, about 20 s…';
   img.src = '/stream/' + camSide + '?t=' + Date.now();
 }
 $('cam').onload = () => $('cam').parentElement.classList.add('live');

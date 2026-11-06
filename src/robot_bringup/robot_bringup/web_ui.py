@@ -3,6 +3,7 @@
 Map + lidar view, live camera (MJPEG from the JPEG previews), mapping/navigation start-stop (via nav_manager), hold-to-drive,
 nav goals, and drive calibration (direction test, 1 m straight, 360 degree spin).
 /encoders: live hall-encoder counts and speeds per track, and hold-to-spin one track (web/encoders.html).
+/imu: live gyro and accelerometer charts from the IMU (web/imu.html).
 /calibrate: stereo checkerboard calibration (live detection, auto-capture, OpenCV calibration,
 writes config/calibration/left.yaml + right.yaml; see stereo_calib.py).
 /mapedit: hand-edit a saved map (paint walls, free space, unknown; original kept as <name>.orig.pgm)
@@ -23,6 +24,7 @@ Idle auto-stop: the stack is stopped after idle_timeout seconds (default 30 min)
 motion (wheel/joint_states), no mapping/navigation, no request from this page and no Foxglove or rosbridge client connected.
 """
 import base64
+import collections
 import glob
 import io
 import json
@@ -43,7 +45,8 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 from action_msgs.msg import GoalStatus
 from nav2_msgs.action import NavigateToPose
-from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
+from nav2_msgs.srv import LoadMap
+from geometry_msgs.msg import PoseWithCovarianceStamped, Twist, Point
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
 from rcl_interfaces.srv import GetParameters, SetParameters
@@ -53,9 +56,9 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.time import Time
-from sensor_msgs.msg import (BatteryState, CompressedImage, Image, JointState, LaserScan, Range,
+from sensor_msgs.msg import (BatteryState, CompressedImage, Image, Imu, JointState, LaserScan, Range,
                              RelativeHumidity, Temperature)
-from std_msgs.msg import Float64MultiArray, String
+from std_msgs.msg import Bool, Float64MultiArray, String
 from std_srvs.srv import SetBool, Trigger
 from tf2_ros import Buffer, TransformListener
 
@@ -91,6 +94,16 @@ def tcp_clients(port):
     return count
 
 
+# Web UI Services menu: id -> (label, what it does, its on/off service).
+SERVICE_MENU = {
+    'cameras': ('Cameras', 'Each runs only while used. Off: no camera views, stereo or dock search.', '/cameras/set_enabled'),
+    'stereo': ('Stereo depth', 'Extra obstacle stops when driving by hand, Depth view. Lidar still protects the robot.', '/depth/set_enabled'),
+    'imu': ('IMU (gyro)', 'Turn tracking. Off: odometry falls back to the tracks.', '/services/imu/set_enabled'),
+    'sensors': ('Sensor and LED board', 'Front distance, temperature, lights.', '/services/sensors/set_enabled'),
+    'crash': ('Crash detection', 'Stops the robot after a hit and marks the spot on the map. Needs the IMU.', '/services/crash/set_enabled'),
+    'foxglove': ('Foxglove', 'Remote viewing on port 8765. Off: Foxglove can\'t connect.', '/services/foxglove/set_enabled'),
+    'rosbridge': ('rosbridge', 'Web and phone ROS clients on port 9090.', '/services/rosbridge/set_enabled'),
+}
 COSTMAP_TOPICS = {'global': '/global_costmap/costmap', 'local': '/local_costmap/costmap'}
 
 
@@ -139,6 +152,10 @@ class WebUI(Node):
         # Nav2 costmaps on demand, same idea as /scan. layer -> {sub, msg, seq, time}
         self.costmaps = {name: {'sub': None, 'msg': None, 'seq': 0, 'time': 0.0} for name in COSTMAP_TOPICS}
         self.costmap_wanted = 0.0
+        # /imu/data on demand, for the /imu page. Rows: seq, time, gyro xyz, accel xyz.
+        self.imu_sub, self.imu_wanted, self.imu_seq = None, 0.0, 0
+        self.imu_rows = collections.deque(maxlen=1800)  # 36 s at 50 Hz
+        self.imu_frame, self.imu_yaw = '', None
 
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.manual_pub = self.create_publisher(Twist, '/cmd_vel_manual', 10)  # joystick; see drive_guard.py
@@ -166,6 +183,12 @@ class WebUI(Node):
         # Sensor + LED Pico (pico_io.py): lights status, front range, temperature/humidity.
         self.lights, self.lights_time = {}, 0.0
         self.create_subscription(String, '/lights/status', self.on_lights, latched)
+        self.create_subscription(Bool, '/depth/enabled', lambda m: self.service_on.__setitem__('stereo', m.data), latched)
+        self.crash_marks = []
+        self.create_subscription(String, '/crash/list', lambda m: setattr(self, 'crash_marks', json.loads(m.data)), latched)
+        self.crash_remove_pub = self.create_publisher(Point, '/crash/remove', 10)
+        self.imu_status = ''
+        self.create_subscription(String, '/imu/status', lambda m: setattr(self, 'imu_status', m.data), latched)
         self.headlights_pub = self.create_publisher(String, '/lights/headlights', 10)
         self.io = {}  # name -> (value, monotonic time)
         self.create_subscription(Range, '/range/front', lambda m: self.io_value('range', m.range), 10)
@@ -184,6 +207,13 @@ class WebUI(Node):
         self.calib = {}
         self.nav_params = self.create_client(SetParameters, '/nav_manager/set_parameters', callback_group=group)
         self.guard_override = self.create_client(SetBool, '/drive_guard/override', callback_group=group)
+        self.service_clients = {name: self.create_client(SetBool, item[2], callback_group=group)
+                                for name, item in SERVICE_MENU.items()}
+        self.service_on, self.cameras_detail = {}, ''
+        self.map_load = self.create_client(LoadMap, '/map_server/load_map', callback_group=group)
+        self.mask_load = self.create_client(LoadMap, '/filter_mask_server/load_map', callback_group=group)
+        self.create_subscription(String, '/services/status', self.on_services, latched)
+        self.create_subscription(String, '/cameras/status', self.on_cameras_status, latched)
 
         # Manual / calibration motion: published only while fresh, so Nav2 is not fought.
         self.motion_manual = False
@@ -324,6 +354,13 @@ class WebUI(Node):
         elif not wanted and self.scan_sub is not None:
             self.destroy_subscription(self.scan_sub)
             self.scan_sub, self.scan = None, None
+        imu_wanted = time.monotonic() - self.imu_wanted < 8.0
+        if imu_wanted and self.imu_sub is None:
+            self.imu_sub = self.lazy_sub(Imu, '/imu/data', self.on_imu, qos_profile_sensor_data)
+        elif not imu_wanted and self.imu_sub is not None:
+            self.destroy_subscription(self.imu_sub)
+            self.imu_sub = None
+            self.imu_rows.clear()
         cost_wanted = time.monotonic() - self.costmap_wanted < 8.0
         for name, layer in self.costmaps.items():
             if cost_wanted and layer['sub'] is None:
@@ -351,6 +388,12 @@ class WebUI(Node):
             elif not wanted and cam['sub'] is not None:
                 self.destroy_subscription(cam['sub'])
                 cam['sub'] = None
+
+    def on_imu(self, msg):
+        g, a = msg.angular_velocity, msg.linear_acceleration
+        self.imu_seq += 1
+        self.imu_frame = msg.header.frame_id
+        self.imu_rows.append((self.imu_seq, time.monotonic(), g.x, g.y, g.z, a.x, a.y, a.z))
 
     def on_costmap(self, layer, msg):
         layer['msg'], layer['seq'], layer['time'] = msg, layer['seq'] + 1, time.monotonic()
@@ -392,6 +435,26 @@ class WebUI(Node):
             t = Twist()
             t.linear.x, t.angular.z = self.motion
             (self.manual_pub if self.motion_manual else self.cmd_pub).publish(t)
+
+    def on_services(self, msg):
+        self.service_on.update(json.loads(msg.data))
+
+    def on_cameras_status(self, msg):
+        self.service_on['cameras'] = msg.data != 'disabled'
+        self.cameras_detail = msg.data
+
+    def services_payload(self):
+        return [{'id': name, 'label': item[0], 'help': item[1],
+                 'on': self.service_on.get(name) if self.service_clients[name].service_is_ready() else None}
+                for name, item in SERVICE_MENU.items()]
+
+    def set_service(self, name, on):
+        client = self.service_clients[name]
+        if not client.wait_for_service(timeout_sec=1.0):
+            raise RuntimeError(f'{SERVICE_MENU[name][0]} can\'t be changed: is the stack running? Restart it if so')
+        if wait_future(client.call_async(SetBool.Request(data=on)), 15.0) is None:
+            raise RuntimeError(f'{SERVICE_MENU[name][0]} didn\'t answer')
+        self.service_on[name] = on
 
     def set_guard_override(self, on):
         if not self.guard_override.wait_for_service(timeout_sec=1.0):
@@ -766,6 +829,10 @@ class WebUI(Node):
             'plan': self.plan if time.monotonic() - self.plan_time < 3.0 and world == 'map' else [],
             'battery': self.battery_payload(),
             'io': self.io_payload(),
+            # Latched, so it outlives the driver: only believed while the driver is there.
+            'imu': self.imu_status if self.count_publishers('/imu/data') else '',
+            'services': self.services_payload(),
+            'crash_marks': self.crash_marks,
             'localized': world == 'map',
             'goal': self.goal,
             'frame': world,
@@ -833,6 +900,26 @@ class WebUI(Node):
                 out['data'] = base64.b64encode(bytes(m.data)).decode()
             layers[name] = out
         return {'frame': world, 'layers': layers}
+
+    def imu_payload(self, since):
+        """Samples newer than since: [time, gyro xyz in deg/s, accel xyz in m/s^2], in the robot's axes
+        once the board's mount is known from TF."""
+        self.imu_wanted = now = time.monotonic()
+        if self.imu_yaw is None and self.imu_frame:
+            at = self.pose_in('base_link', self.imu_frame)
+            self.imu_yaw = at['yaw'] if at else None
+        c, s = (math.cos(self.imu_yaw), math.sin(self.imu_yaw)) if self.imu_yaw is not None else (1.0, 0.0)
+        rows, last = [], since
+        for seq, t, gx, gy, gz, ax, ay, az in list(self.imu_rows):
+            if seq <= since:
+                continue
+            last = seq
+            d = 180.0 / math.pi
+            rows.append([round(t, 3), round((c * gx - s * gy) * d, 2), round((s * gx + c * gy) * d, 2), round(gz * d, 2),
+                         round(c * ax - s * ay, 3), round(s * ax + c * ay, 3), round(az, 3)])
+        fresh = bool(self.imu_rows) and now - self.imu_rows[-1][1] < 2.0
+        return {'ok': fresh, 'now': round(now, 3), 'seq': last, 'samples': rows,
+                'frame': 'robot' if self.imu_yaw is not None else 'board'}
 
     def wheels_payload(self):
         w = self.wheels
@@ -1041,13 +1128,34 @@ class WebUI(Node):
         Image.fromarray(out).save(buf, 'PNG')
         return buf.getvalue()
 
+    def apply_map_live(self, name):
+        """If navigation is using this map, load the saved edits into it now. Returns a note for the user."""
+        if self.nav_map != name or self.mode != 'navigating':
+            return ''
+        def load(client, yml):
+            if not client.wait_for_service(timeout_sec=1.0):
+                return False
+            res = wait_future(client.call_async(LoadMap.Request(map_url=yml)), 10.0)
+            return res is not None and res.result == LoadMap.Response.RESULT_SUCCESS
+        if not load(self.map_load, self.map_paths(name)[1]):
+            return " Navigation couldn't load the edits: restart it."
+        kyml = self.keepout_paths(name)[1]
+        if not os.path.exists(kyml):
+            return ' Navigation updated.'
+        if not self.mask_load.service_is_ready():  # navigation started before this map had any zones
+            return ' Map updated in navigation. Restart it to apply no-go zones, this is the first on this map.'
+        if not load(self.mask_load, kyml):
+            return " Map updated in navigation, but its no-go zones couldn't load: restart it."
+        return ' Navigation updated.'
+
     def map_edit_save_keepout(self, name, png_b64):
         _, yml, _ = self.map_paths(name)
         kpgm, kyml = self.keepout_paths(name)
         from PIL import Image
         with Image.open(io.BytesIO(base64.b64decode(png_b64))) as im:
             nogo = np.array(im.convert('L')) > 127
-        if not nogo.any():
+        # Running navigation can't drop its zones, so it gets an empty mask to load instead.
+        if not nogo.any() and not (self.nav_map == name and self.mode == 'navigating' and self.mask_load.service_is_ready()):
             for path in (kpgm, kyml):
                 if os.path.exists(path):
                     os.remove(path)
@@ -1092,7 +1200,7 @@ class WebUI(Node):
             cells = self.map_edit_save_keepout(name, keepout_b64)
             res = self.map_yaml_geometry(self.map_paths(name)[1])['resolution']
             zones = f' No-go zones: {cells * res * res:.1f} m².' if cells else ' No no-go zones.'
-        note = ' Navigation is using this map: restart it to load the edits.' if self.nav_map == name and self.mode == 'navigating' else ''
+        note = self.apply_map_live(name)
         return {'success': True, 'message': f'saved "{name}" (original kept).{zones}{note}'}
 
     def map_edit_revert(self, name):
@@ -1101,7 +1209,7 @@ class WebUI(Node):
             raise RuntimeError('this map has no saved original')
         os.replace(orig, pgm)
         self.thumbs.pop(name, None)
-        return {'success': True, 'message': f'"{name}" is back to the original SLAM map'}
+        return {'success': True, 'message': f'"{name}" is back to the original SLAM map.{self.apply_map_live(name)}'}
 
     def continue_map(self, name):
         if not MAP_NAME_RE.match(name):
@@ -1174,9 +1282,9 @@ def make_handler(node, web_dir):
         def do_GET(self):
             node.touch('web page open')
             path = self.path.split('?')[0]
-            if path in ('/', '/index.html', '/encoders', '/calibrate', '/mapedit'):
+            if path in ('/', '/index.html', '/encoders', '/calibrate', '/mapedit', '/imu'):
                 page = {'/encoders': 'encoders.html', '/calibrate': 'calibrate.html',
-                        '/mapedit': 'mapedit.html'}.get(path, 'index.html')
+                        '/mapedit': 'mapedit.html', '/imu': 'imu.html'}.get(path, 'index.html')
                 with open(os.path.join(web_dir, page), 'rb') as f:
                     self.send(200, f.read(), 'text/html; charset=utf-8')
             elif path == '/api/wheels':
@@ -1211,6 +1319,9 @@ def make_handler(node, web_dir):
                 self.send(200, body) if body else self.send(404, {'error': 'no map'})
             elif path == '/api/scan':
                 self.send(200, node.scan_payload())
+            elif path == '/api/imu':
+                since = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get('since', ['0'])[0]
+                self.send(200, node.imu_payload(int(since) if since.isdigit() else 0))
             elif path == '/api/costmap':
                 query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 self.send(200, node.costmap_payload({k: int(v[0]) for k, v in query.items() if v[0].isdigit()}))
@@ -1231,6 +1342,12 @@ def make_handler(node, web_dir):
                 if path == '/api/drive':
                     node.test_abort.set()
                     node.drive(float(body.get('v', 0)), float(body.get('w', 0)), manual=True)
+                    self.send(200, {'ok': True})
+                elif path.startswith('/api/services/') and path[14:] in SERVICE_MENU:
+                    node.set_service(path[14:], bool(body.get('on')))
+                    self.send(200, {'ok': True})
+                elif path == '/api/crash/remove':
+                    node.crash_remove_pub.publish(Point(x=float(body.get('x', math.nan)), y=float(body.get('y', math.nan))))
                     self.send(200, {'ok': True})
                 elif path == '/api/guard/override':
                     node.set_guard_override(bool(body.get('on')))

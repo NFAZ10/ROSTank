@@ -51,6 +51,7 @@ robot calib set track_width=0.19 wheel_radius=0.031   # live + saved to drive.ya
 robot snap left              # picture to ~/robot_snaps/ (left | right | depth)
 robot depth                  # stereo distance to what's left / ahead / right
 robot guard off | on         # obstacle protection for manual driving (or the Drive tab button)
+robot stereo off | on        # stereo depth, saves CPU when off (or the Drive tab button)
 ```
 Each camera runs only while something uses it (a view of it, depth, dock), so it takes about
 20 s to start; `robot status` shows which are on. Stereo depth runs only while something watches it: web UI → Drive → **Depth** (red near,
@@ -58,11 +59,11 @@ blue far, black unknown), `robot depth`, or Foxglove on `/depth/points` or `/dep
 It measures about 0.25–6 m, at about 4–8 fps.
 Overriding protection affects only manual driving (joystick, `robot drive`), limits it to
 0.15 m/s, and ends after 20 s without a manual command; Nav2 stays protected.
-While driving, `drive_guard` also stops for `/depth/obstacles`: depth cut to 5–30 cm above the
+While driving manually (not Nav2, which is lidar only: both together overload the CPU), `drive_guard` also stops for `/depth/obstacles`: depth cut to 5–30 cm above the
 floor and within 1.8 m, counted only once seen in 2 of 3 frames. After moving the cameras,
 update `camera_pitch` (URDF) and `right_row_offset` (`stereo_depth`), or recalibrate.
-The APM flight controller is a sensor board: `apm_imu` publishes its gyro and accelerometer on
-`/imu/apm` at 50 Hz. Keep its servo outputs disconnected, and the robot still when it first powers up.
+The IMU (MPU6050-type, on the sensor Pico's I2C bus) gives gyro and accelerometer on `/imu/data` at
+50 Hz. `mpu_imu` measures the gyro's offset, so keep the robot still for a few seconds after start-up.
 Drive calibration (1 m straight, 360° spin): web UI → Calibration.
 Stereo camera calibration: web UI → Camera calibration (`/calibrate`).
 

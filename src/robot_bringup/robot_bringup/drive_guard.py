@@ -6,13 +6,16 @@
 Looks along the direction of travel in a corridor the robot's width plus a margin: full
 speed beyond slow_dist, slowing down closer in, stopped at stop_dist (turning on the spot
 stays allowed, so the robot can be steered away). Obstacles come from the lidar (all
-around) and stereo depth ahead (/depth/obstacles: things off the lidar's plane, confirmed
-over several frames by stereo_depth.py).
+around) and, for manual driving only, stereo depth ahead (/depth/obstacles: things off the
+lidar's plane, confirmed over several frames by stereo_depth.py). Not for Nav2: depth keeps both
+cameras running, and with Nav2 too that overloads the CPU.
 
 Sensors are only subscribed while driving and for wake_timeout after, so the lidar motor
 (lidar_standby.py) and stereo depth (stereo_depth.py) still idle when nothing moves. While
 the lidar spins up there is no fresh scan: until then only turning is let through.
 Why it is holding back is latched on /drive_guard/status.
+
+A crash (crash_monitor.py, /crash/event) stops motion that way for crash_hold seconds; backing away is fine.
 
 Override, for driving out of a spot the guard won't allow: the drive_guard/override service
 (SetBool) lets /cmd_vel_manual through unchecked, capped at override_speed. /cmd_vel stays
@@ -21,6 +24,7 @@ command.
 
 /wheel/cmd (per-track bench test, tracks off) does not pass through here.
 """
+import json
 import math
 import time
 
@@ -69,13 +73,16 @@ class DriveGuard(Node):
         self.create_subscription(Twist, 'cmd_vel', self.on_cmd, 10)
         self.create_subscription(Twist, 'cmd_vel_manual', lambda m: self.on_cmd(m, manual=True), 10)
         self.create_service(SetBool, 'drive_guard/override', self.on_override)
+        self.create_subscription(String, '/crash/event', self.on_crash, 10)
+        self.crash_hold = p('crash_hold', 1.5)
+        self.crash_until, self.crash_direction = 0.0, 0
         self.tf = Buffer()
         TransformListener(self.tf, self)
         self.frames = {}  # sensor frame -> 4x4 into base_link (both mounts are fixed)
 
         self.cmd, self.cmd_time, self.sent_zero, self.cmd_manual = None, 0.0, True, False
         self.override_until = 0.0  # monotonic; 0 = not overridden
-        self.subs = None
+        self.subs, self.depth_sub, self.manual_time = None, None, 0.0
         self.scan_pts, self.scan_time = np.zeros((0, 2)), 0.0
         self.depth_pts, self.depth_time = np.zeros((0, 2)), 0.0
         self.status = None
@@ -87,12 +94,16 @@ class DriveGuard(Node):
     def wake(self):
         if self.subs is None:
             self.subs = [self.create_subscription(LaserScan, '/scan', self.on_scan, qos_profile_sensor_data)]
-            if self.use_depth:
-                self.subs.append(self.create_subscription(PointCloud2, '/depth/obstacles', self.on_depth,
-                                                          qos_profile_sensor_data))
+        if self.use_depth and self.cmd_manual and self.depth_sub is None:
+            self.depth_sub = self.create_subscription(PointCloud2, '/depth/obstacles', self.on_depth,
+                                                      qos_profile_sensor_data)
 
     def manage(self):
         # Single-threaded executor: destroying here can't race a take on another thread.
+        if self.depth_sub is not None and time.monotonic() - self.manual_time > self.wake_timeout:
+            self.destroy_subscription(self.depth_sub)
+            self.depth_sub = None
+            self.depth_time = 0.0
         if self.subs is not None and time.monotonic() - self.cmd_time > self.wake_timeout:
             for sub in self.subs:
                 self.destroy_subscription(sub)
@@ -138,10 +149,16 @@ class DriveGuard(Node):
         res.success, res.message = True, self.status
         return res
 
+    def on_crash(self, msg):
+        self.crash_until = time.monotonic() + self.crash_hold
+        self.crash_direction = json.loads(msg.data)['direction']
+
     def on_cmd(self, msg, manual=False):
         self.cmd, self.cmd_time, self.cmd_manual = msg, time.monotonic(), manual
-        if manual and self.override_until:
-            self.override_until = self.cmd_time + self.override_timeout
+        if manual:
+            self.manual_time = self.cmd_time
+            if self.override_until:
+                self.override_until = self.cmd_time + self.override_timeout
         self.wake()
         self.step()  # react now, not on the next tick
 
@@ -174,6 +191,9 @@ class DriveGuard(Node):
         v = self.cmd.linear.x
         if self.override_until and self.cmd_manual:
             v = max(-self.override_speed, min(self.override_speed, v))
+        elif now < self.crash_until and v * self.crash_direction > 0:
+            v = 0.0
+            self.set_status('stopped: crash detected')
         elif abs(v) > 1e-3:
             if now - self.scan_time > 0.5:
                 v = 0.0

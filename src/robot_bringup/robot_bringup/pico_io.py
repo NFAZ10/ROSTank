@@ -5,16 +5,20 @@ Sensors:
                 nothing is published while the sensor is missing.
   temperature   sensor_msgs/Temperature, every 2 s (DHT11)
   humidity      sensor_msgs/RelativeHumidity (0-1), every 2 s
+  imu/raw       sensor_msgs/Imu: MPU6050-type chip, 50 Hz, chip axes, gyro bias NOT removed
+                (mpu_imu.py does that and publishes /imu/data)
 
-Lights: the four LED groups (headlights, top strips, tail lights, spare) are driven from
-the robot's state:
+Lights: LED groups 0 headlights (GP18), 1 body strips (GP20), 2/3 spares, driven from the
+robot's state:
   headlights    /lights/headlights (std_msgs/String 'off' | 'dim' | 'on'). 'on' is the white
                 chip at 255, which is steady: dimmer levels are PWM and band in the cameras.
-  tail lights   dim red; bright red braking; white reversing (from /cmd_vel_safe)
-  top strips    dim white idle; amber blink on the side the robot is turning to; battery
-                low = back strip orange, critical = all red blinking
+  body strips   one chain of side, back and side strips (body_order says which comes first).
+    back        tail light: dim red; bright red braking; white reversing (from /cmd_vel_safe)
+    sides       dim white idle; amber blink on the side the robot is turning to;
+                battery low = orange breathe
+                battery critical = every strip blinking red
   warning       while mapping, exploring or navigating (the robot may move on its own):
-                amber beacon running round the top strips, tail rings wig-wag amber
+                amber beacon running along each side strip, back strip wig-wag amber
                 (brake / reverse still show), and the warning_groups wig-wag amber too
 Status, latched on /lights/status (String, JSON): {"connected", "headlights"}.
 If this node stops, the Pico blanks everything but a dim red breathe on the tail lights.
@@ -30,16 +34,24 @@ from geometry_msgs.msg import Twist
 from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
-from sensor_msgs.msg import Range, RelativeHumidity, Temperature
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Imu, Range, RelativeHumidity, Temperature
 from std_msgs.msg import String
 
-HEAD, TOP, TAIL, SPARE = 0, 1, 2, 3
+HEAD, BODY = 0, 1
 OFF, SOLID, BLINK, BREATHE, CHASE, WIGWAG = range(6)
-FIRMWARE_VERSION = '2'
+FIRMWARE_VERSION = '4'
+GYRO_PER_COUNT = math.radians(1.0 / 65.5)  # +-500 deg/s range
+ACCEL_PER_COUNT = 9.80665 / 4096.0         # +-8 g range
 HEADLIGHT_LEVELS = {'off': 0, 'dim': 60, 'on': 255}
-IDLE_TOP = (0, 0, 0, 12)  # (r, g, b, w), dim: an indicator, not a light
+IDLE_SIDE = (0, 0, 0, 12)  # (r, g, b, w), dim: an indicator, not a light
 AMBER = (255, 90, 0, 0)
 WARNING_MODES = ('mapping', 'exploring', 'navigating')
+
+
+def imu_from_counts(counts):
+    """Firmware's gx gy gz ax ay az -> gyro rad/s, accel m/s^2."""
+    return tuple(c * GYRO_PER_COUNT for c in counts[:3]), tuple(c * ACCEL_PER_COUNT for c in counts[3:])
 
 
 class PicoIO(Node):
@@ -47,11 +59,14 @@ class PicoIO(Node):
         super().__init__('pico_io')
         p = lambda name, default: self.declare_parameter(name, default).value
         self.port = p('port', '/dev/pico_io')
-        # Per group [headlights, top, tails, spare]: LED count and colour order
-        # (0 GRB, 1 RGB, 2 RGBW, 3 GRBW). Top = left, back, right strips chained in that order;
-        # headlights and tails = left ring then right ring.
-        self.counts = list(p('group_counts', [16, 24, 16, 0]))
-        self.types = list(p('group_types', [3, 3, 3, 0]))
+        # Per group [headlights GP18, body strips GP20, spare GP16, spare GP19]: LED count and
+        # colour order (0 GRB, 1 RGB, 2 RGBW, 3 GRBW).
+        self.counts = list(p('group_counts', [14, 24, 0, 0]))
+        self.types = list(p('group_types', [3, 3, 0, 0]))
+        # The body strips' order along the chain from the data input; equal thirds.
+        self.body_order = list(p('body_order', ['right', 'back', 'left']))
+        if sorted(self.body_order) != ['back', 'left', 'right']:
+            raise ValueError("body_order must name 'right', 'back' and 'left' once each")
         # Groups that show the headlights (the spare can stand in for them).
         self.headlight_groups = list(p('headlight_groups', [HEAD]))
         # Extra groups that show the warning pattern instead of their usual look.
@@ -59,10 +74,13 @@ class PicoIO(Node):
             'warning_groups', [], ParameterDescriptor(dynamic_typing=True)).value)
         self.headlights = p('headlights', 'off')
         self.range_frame = p('range_frame', 'range_front')
+        self.imu_frame = p('imu_frame', 'mpu_imu')
+        self.imu_id = None
 
         self.range_pub = self.create_publisher(Range, 'range/front', 10)
         self.temp_pub = self.create_publisher(Temperature, 'temperature', 10)
         self.humidity_pub = self.create_publisher(RelativeHumidity, 'humidity', 10)
+        self.imu_pub = self.create_publisher(Imu, 'imu/raw', qos_profile_sensor_data)
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.status_pub = self.create_publisher(String, '/lights/status', latched)
         self.create_subscription(String, '/lights/headlights', self.on_headlights, 10)
@@ -116,36 +134,31 @@ class PicoIO(Node):
                 out[(g, 0, self.counts[g])] = (SOLID if level else OFF, (0, 0, 0, level), 1000)
 
         warning = self.mode in WARNING_MODES
-        if self.counts[TAIL]:
-            if self.v < -0.02:
-                look = (SOLID, (0, 0, 0, 255), 1000)
-            elif now < self.brake_until:
-                look = (SOLID, (255, 0, 0, 0), 1000)
-            elif warning:
-                look = (WIGWAG, AMBER, 1000)
-            else:
-                look = (SOLID, (50, 0, 0, 0), 1000)
-            out[(TAIL, 0, self.counts[TAIL])] = look
-
-        n = self.counts[TOP]
+        n = self.counts[BODY]
         if n:
-            third = n // 3
-            left = back = right = (SOLID, IDLE_TOP, 1000)
-            if self.battery.startswith('low'):
-                back = (BREATHE, (255, 60, 0, 0), 2000)
-            if abs(self.w) > 0.3:  # turn signal on the side it's turning towards
-                if (self.w > 0) == (self.v >= 0):
-                    left = (BLINK, AMBER, 700)
-                else:
-                    right = (BLINK, AMBER, 700)
-            if self.battery.startswith(('critical', 'shutting')):
-                left = back = right = (BLINK, (255, 0, 0, 0), 500)
-            if warning and not self.battery.startswith(('critical', 'shutting')):
-                out[(TOP, 0, n)] = (CHASE, AMBER, 1200)  # one beacon all the way round
+            critical = self.battery.startswith(('critical', 'shutting'))
+            if self.v < -0.02:
+                back = (SOLID, (0, 0, 0, 255), 1000)
+            elif now < self.brake_until:
+                back = (SOLID, (255, 0, 0, 0), 1000)
+            elif warning:
+                back = (WIGWAG, AMBER, 1000)
             else:
-                out[(TOP, 0, third)] = left
-                out[(TOP, third, third)] = back
-                out[(TOP, 2 * third, n - 2 * third)] = right
+                back = (SOLID, (50, 0, 0, 0), 1000)
+            side = (SOLID, IDLE_SIDE, 1000)
+            if warning:
+                side = (CHASE, AMBER, 1200)
+            elif self.battery.startswith('low'):
+                side = (BREATHE, (255, 60, 0, 0), 2000)
+            look = {'back': back, 'left': side, 'right': side}
+            if abs(self.w) > 0.3:  # turn signal on the side it's turning towards
+                look['left' if (self.w > 0) == (self.v >= 0) else 'right'] = (BLINK, AMBER, 700)
+            if critical:
+                look = dict.fromkeys(look, (BLINK, (255, 0, 0, 0), 500))
+            third = n // 3
+            for i, name in enumerate(self.body_order):
+                first = i * third
+                out[(BODY, first, third if i < 2 else n - first)] = look[name]
         for g in self.warning_groups:
             if self.counts[g] and warning:
                 out = {k: v for k, v in out.items() if k[0] != g}
@@ -223,7 +236,19 @@ class PicoIO(Node):
                 pass
 
     def on_line(self, parts):
-        if len(parts) == 3 and parts[0] == 'R' and parts[1] != '-1':
+        if len(parts) == 7 and parts[0] == 'I':
+            gyro, accel = imu_from_counts([int(c) for c in parts[1:]])
+            msg = Imu()
+            msg.header.stamp, msg.header.frame_id = self.get_clock().now().to_msg(), self.imu_frame
+            msg.orientation_covariance[0] = -1.0  # no orientation (REP 145)
+            msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z = gyro
+            msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z = accel
+            self.imu_pub.publish(msg)
+        elif len(parts) == 2 and parts[0] == 'M':
+            if parts[1] != self.imu_id:
+                self.imu_id = parts[1]
+                self.get_logger().info('IMU not answering' if parts[1] == '-1' else f'IMU chip id 0x{int(parts[1]):02x}')
+        elif len(parts) == 3 and parts[0] == 'R' and parts[1] != '-1':
             msg = Range()
             msg.header.stamp = self.get_clock().now().to_msg()
             msg.header.frame_id = self.range_frame
